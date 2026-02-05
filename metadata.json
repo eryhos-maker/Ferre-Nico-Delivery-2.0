@@ -1,0 +1,7 @@
+{
+  "name": "Ferre Nico Delivery 2.0",
+  "description": "A high-performance logistics management system for FerreNico, featuring collaborator tools, driver tracking with photo evidence, and an administrative dashboard with AI-powered insights.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
