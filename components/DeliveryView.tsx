@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { supabase } from '../services/supabaseClient';
+import { sheetDb } from '../services/sheetDbService';
 import { TicketStatus, Pedido } from '../types';
 
 const DeliveryView: React.FC = () => {
@@ -22,13 +22,22 @@ const DeliveryView: React.FC = () => {
   const fetchInTransitOrders = async () => {
     setLoadingList(true);
     try {
-      const { data, error } = await supabase
-        .from('pedido')
-        .select('*')
-        .eq('estado', TicketStatus.IN_TRANSIT);
-      
-      if (error) throw error;
-      if (data) setInTransitOrders(data);
+      const data = await sheetDb.get('pedido', { estado: TicketStatus.IN_TRANSIT });
+      if (data && Array.isArray(data)) {
+        const parsedData = data.map((item: any) => {
+          const normalizedItem: any = {};
+          for (const key in item) {
+            normalizedItem[key.trim().toLowerCase()] = item[key];
+          }
+          return {
+            ...normalizedItem,
+            monto_de_compra: parseFloat(normalizedItem.monto_de_compra) || 0,
+            unidades: parseInt(normalizedItem.unidades) || 0,
+            costo_de_envio: parseFloat(normalizedItem.costo_de_envio) || 0
+          };
+        });
+        setInTransitOrders(parsedData);
+      }
     } catch (error) {
       console.error("Error fetching in-transit orders:", error);
     } finally {
@@ -55,12 +64,13 @@ const DeliveryView: React.FC = () => {
     setIsSubmitting(true);
     
     try {
-      const { error } = await supabase
-        .from('pedido')
-        .update({ estado: TicketStatus.DELIVERED })
-        .eq('folio', folio.trim());
+      const selectedFolio = folio.trim();
+      if (selectedFolio.startsWith('NO_FOLIO_')) {
+        alert("Este pedido no tiene un folio asignado en la base de datos y no puede ser procesado.");
+        return;
+      }
 
-      if (error) throw error;
+      await sheetDb.update('pedido', 'folio', selectedFolio, { estado: TicketStatus.DELIVERED });
 
       alert(`✅ Pedido marcado como ENTREGADO exitosamente.`);
       resetForm();
@@ -93,23 +103,20 @@ const DeliveryView: React.FC = () => {
     setIsSubmitting(true);
 
     try {
-      // 1. Update Pedido Status
-      const { error: updateError } = await supabase
-        .from('pedido')
-        .update({ estado: TicketStatus.NOT_FOUND }) 
-        .eq('folio', folio.trim());
+      const selectedFolio = folio.trim();
+      if (selectedFolio.startsWith('NO_FOLIO_')) {
+        alert("Este pedido no tiene un folio asignado en la base de datos y no puede ser procesado.");
+        return;
+      }
 
-      if (updateError) throw updateError;
+      // 1. Update Pedido Status
+      await sheetDb.update('pedido', 'folio', selectedFolio, { estado: TicketStatus.NOT_FOUND });
 
       // 2. Insert Evidence
-      const { error: insertError } = await supabase
-        .from('evidencias_entrega')
-        .insert([{
-           folio: folio, 
-           evidencia_fotografica: photoBase64
-        }]);
-
-      if (insertError) throw insertError;
+      await sheetDb.insert('evidencias_entrega', {
+         folio: selectedFolio, 
+         evidencia_fotografica: photoBase64
+      });
 
       alert(`⚠️ Incidencia reportada.\nEstado: NO ENTREGADO / NO ENCONTRADO`);
       resetForm();
@@ -130,14 +137,46 @@ const DeliveryView: React.FC = () => {
       const reader = new FileReader();
       reader.onloadend = () => {
         if (typeof reader.result === 'string') {
-          setPhotoBase64(reader.result);
+          // Comprimir la imagen para no exceder el límite de 50,000 caracteres de Google Sheets
+          const img = new Image();
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            const MAX_WIDTH = 400; // Resolución baja para evidencia
+            const MAX_HEIGHT = 400;
+            let width = img.width;
+            let height = img.height;
+
+            if (width > height) {
+              if (width > MAX_WIDTH) {
+                height *= MAX_WIDTH / width;
+                width = MAX_WIDTH;
+              }
+            } else {
+              if (height > MAX_HEIGHT) {
+                width *= MAX_HEIGHT / height;
+                height = MAX_HEIGHT;
+              }
+            }
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              ctx.drawImage(img, 0, 0, width, height);
+              // Comprimir a JPEG con calidad 0.4
+              const compressedBase64 = canvas.toDataURL('image/jpeg', 0.4);
+              setPhotoBase64(compressedBase64);
+            } else {
+              setPhotoBase64(reader.result as string);
+            }
+          };
+          img.src = reader.result;
         }
       };
       reader.readAsDataURL(file);
     }
   };
 
-  const selectedOrderInfo = inTransitOrders.find(o => o.folio === folio);
+  const selectedOrderInfo = inTransitOrders.find(o => o.folio && String(o.folio).trim() === folio.trim());
 
   return (
     <div className="animate-fadeIn">
@@ -167,9 +206,9 @@ const DeliveryView: React.FC = () => {
               className="w-full pl-14 pr-4 py-5 text-sm font-bold border-2 border-gray-100 rounded-2xl focus:border-red-600 focus:ring-0 outline-none transition-all bg-gray-50 text-gray-900 appearance-none truncate"
             >
               <option value="">-- Seleccionar de la lista --</option>
-              {inTransitOrders.map((order) => (
-                <option key={order.folio} value={order.folio}>
-                  {order.no_tiket} - {order.nombre_cliente.split('|')[0].trim()}
+              {inTransitOrders.map((order, index) => (
+                <option key={order.folio || `order-${index}`} value={order.folio || `NO_FOLIO_${index}`}>
+                  {order.folio ? '' : '[SIN FOLIO] '}{order.no_ticket} - {order.nombre_cliente}
                 </option>
               ))}
             </select>
@@ -183,9 +222,7 @@ const DeliveryView: React.FC = () => {
             <div className="mt-4 p-4 bg-gray-50 rounded-xl border border-gray-100 animate-fadeIn">
               <p className="text-xs text-gray-500 font-bold uppercase mb-1">Dirección de Entrega:</p>
               <p className="text-sm font-medium text-gray-800">
-                {selectedOrderInfo.nombre_cliente.includes('|') 
-                  ? selectedOrderInfo.nombre_cliente.split('|')[1] 
-                  : 'Dirección no especificada en cliente'}
+                {selectedOrderInfo.direccion || 'Dirección no especificada'}
               </p>
               <div className="flex gap-4 mt-3">
                  <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded font-bold">

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { supabase } from '../services/supabaseClient';
+import { sheetDb, getNextFolio } from '../services/sheetDbService';
 import { TicketStatus, Pedido } from '../types';
 
 const OrderView: React.FC = () => {
@@ -45,44 +45,36 @@ const OrderView: React.FC = () => {
     setSuccessOrder(null);
 
     try {
-      const fullClientName = `${formData.clientName} | ${formData.deliveryAddress}`;
+      const newFolio = await getNextFolio();
+      const newOrder = {
+        folio: newFolio,
+        no_ticket: formData.ticketNo,
+        nombre_cliente: formData.clientName,
+        direccion: formData.deliveryAddress,
+        telefono: formData.phone,
+        monto_de_compra: parseFloat(formData.purchaseAmount) || 0,
+        unidades: parseInt(formData.units) || 0,
+        costo_de_envio: parseFloat(formData.shippingCost) || 0,
+        estado: TicketStatus.PENDING,
+        fecha_creacion: new Date().toISOString()
+      };
 
-      // Insert and strictly select the returned data to ensure DB persistence
-      const { data, error } = await supabase
-        .from('pedido')
-        .insert([
-          {
-            no_tiket: formData.ticketNo,
-            nombre_cliente: fullClientName,
-            telefono: formData.phone,
-            monto_de_compra: parseFloat(formData.purchaseAmount) || 0,
-            unidades: parseInt(formData.units) || 0,
-            costo_de_envio: parseFloat(formData.shippingCost) || 0,
-            estado: TicketStatus.PENDING
-          }
-        ])
-        .select(); // .select() is crucial to verify it was actually created
+      // Insert into SheetDB
+      await sheetDb.insert('pedido', newOrder);
 
-      if (error) throw error;
-
-      // Ensure data exists before showing success
-      if (data && data.length > 0) {
-        setSuccessOrder(data[0]);
-        
-        // Reset form only on success
-        setFormData({
-          ticketNo: '',
-          vendorNo: '',
-          clientName: '',
-          deliveryAddress: '',
-          phone: '',
-          purchaseAmount: '',
-          units: '',
-          shippingCost: ''
-        });
-      } else {
-        throw new Error("La base de datos no retornó confirmación.");
-      }
+      setSuccessOrder(newOrder);
+      
+      // Reset form only on success
+      setFormData({
+        ticketNo: '',
+        vendorNo: '',
+        clientName: '',
+        deliveryAddress: '',
+        phone: '',
+        purchaseAmount: '',
+        units: '',
+        shippingCost: ''
+      });
 
     } catch (error: any) {
       console.error('Error creating order:', error);
@@ -261,11 +253,11 @@ const OrderView: React.FC = () => {
             <div className="bg-gray-50 rounded-xl p-4 mb-6 text-left space-y-2 border border-gray-100">
                <div className="flex justify-between text-sm">
                  <span className="text-gray-500 font-bold">Ticket:</span>
-                 <span className="font-black text-gray-800">{successOrder.no_tiket}</span>
+                 <span className="font-black text-gray-800">{successOrder.no_ticket}</span>
                </div>
                <div className="flex justify-between text-sm">
                  <span className="text-gray-500 font-bold">Folio Sistema:</span>
-                 <span className="font-mono text-xs text-gray-600">{successOrder.folio.substring(0,8)}...</span>
+                 <span className="font-mono text-xs text-gray-600 font-bold">{successOrder.folio}</span>
                </div>
                <div className="flex justify-between text-sm">
                  <span className="text-gray-500 font-bold">Estado:</span>

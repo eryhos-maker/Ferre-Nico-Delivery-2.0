@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { supabase } from '../services/supabaseClient';
+import { sheetDb } from '../services/sheetDbService';
 import { Pedido, TicketStatus } from '../types';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 
@@ -34,12 +34,25 @@ const AdminView: React.FC = () => {
 
   const fetchTickets = async () => {
     setIsLoading(true);
-    const { data, error } = await supabase
-      .from('pedido')
-      .select('*')
-      .order('created_at', { ascending: false });
-    
-    if (data) setTickets(data as Pedido[]);
+    try {
+      const data = await sheetDb.get('pedido');
+      if (data && Array.isArray(data)) {
+        const parsedData = data.map((item: any) => ({
+          ...item,
+          monto_de_compra: parseFloat(item.monto_de_compra) || 0,
+          unidades: parseInt(item.unidades) || 0,
+          costo_de_envio: parseFloat(item.costo_de_envio) || 0
+        }));
+        parsedData.sort((a: any, b: any) => {
+          if (!a.fecha_creacion) return 1;
+          if (!b.fecha_creacion) return -1;
+          return new Date(b.fecha_creacion).getTime() - new Date(a.fecha_creacion).getTime();
+        });
+        setTickets(parsedData);
+      }
+    } catch (error) {
+      console.error("Error fetching tickets:", error);
+    }
     setIsLoading(false);
   };
 
@@ -56,20 +69,16 @@ const AdminView: React.FC = () => {
     e.preventDefault();
     if (!editingTicket) return;
     
-    const { error } = await supabase
-      .from('pedido')
-      .update({ 
+    try {
+      await sheetDb.update('pedido', 'folio', editingTicket.folio, { 
         estado: editingTicket.estado,
-        no_tiket: editingTicket.no_tiket,
+        no_ticket: editingTicket.no_ticket,
         monto_de_compra: editingTicket.monto_de_compra
-      })
-      .eq('folio', editingTicket.folio);
-
-    if (!error) {
+      });
       alert("Datos actualizados correctamente.");
       setEditingTicket(null);
       fetchTickets();
-    } else {
+    } catch (error: any) {
       alert("Error al actualizar: " + error.message);
     }
   };
@@ -78,28 +87,21 @@ const AdminView: React.FC = () => {
     if (window.confirm("¿Está seguro de que desea ELIMINAR este pedido permanentemente? Esta acción no se puede deshacer.")) {
       try {
         // 1. Eliminar evidencias relacionadas primero (para evitar error de FK)
-        const { error: evidenceError } = await supabase
-          .from('evidencias_entrega')
-          .delete()
-          .eq('folio', folio);
-          
-        if (evidenceError) console.warn("Nota: No se pudieron borrar evidencias (o no existían):", evidenceError.message);
+        try {
+          await sheetDb.delete('evidencias_entrega', 'folio', folio);
+        } catch (evidenceError: any) {
+          console.warn("Nota: No se pudieron borrar evidencias (o no existían):", evidenceError.message);
+        }
 
         // 2. Eliminar embarque relacionado
-        const { error: shipmentError } = await supabase
-          .from('embarque')
-          .delete()
-          .eq('folio', folio);
-
-        if (shipmentError) console.warn("Nota: No se pudo borrar embarque (o no existía):", shipmentError.message);
+        try {
+          await sheetDb.delete('embarcar', 'folio', folio);
+        } catch (shipmentError: any) {
+          console.warn("Nota: No se pudo borrar embarque (o no existía):", shipmentError.message);
+        }
 
         // 3. Eliminar el pedido principal
-        const { error } = await supabase
-          .from('pedido')
-          .delete()
-          .eq('folio', folio);
-
-        if (error) throw error;
+        await sheetDb.delete('pedido', 'folio', folio);
 
         alert("Pedido eliminado correctamente.");
         fetchTickets();
@@ -113,13 +115,16 @@ const AdminView: React.FC = () => {
   // --- Print Logic ---
   const openPrintModal = async (ticket: Pedido) => {
     // Fetch shipment details if they exist
-    const { data } = await supabase
-      .from('embarque')
-      .select('unidad, placas, chofer')
-      .eq('folio', ticket.folio)
-      .maybeSingle();
-
-    setPrintShipmentData(data || { unidad: 'N/A', placas: 'N/A', chofer: 'N/A' });
+    try {
+      const data = await sheetDb.get('embarcar', { folio: ticket.folio });
+      if (data && Array.isArray(data) && data.length > 0) {
+        setPrintShipmentData(data[0]);
+      } else {
+        setPrintShipmentData({ unidad: 'N/A', placas: 'N/A', chofer: 'N/A' });
+      }
+    } catch (error) {
+      setPrintShipmentData({ unidad: 'N/A', placas: 'N/A', chofer: 'N/A' });
+    }
     setPrintOrder(ticket);
   };
 
@@ -185,14 +190,25 @@ const AdminView: React.FC = () => {
       let headers: string[] = [];
       
       if (reportType === 'orders') {
-        const { data: res, error } = await supabase
-          .from('pedido')
-          .select(`created_at, no_tiket, nombre_cliente, telefono, unidades, estado, monto_de_compra`)
-          .gte('created_at', `${startDate}T00:00:00`)
-          .lte('created_at', `${endDate}T23:59:59`);
+        const res = await sheetDb.get('pedido');
+        if (res && Array.isArray(res)) {
+          const filteredData = res.filter((item: any) => {
+            if (!item.fecha_creacion) return false;
+            const itemDate = item.fecha_creacion.split('T')[0];
+            return itemDate >= startDate && itemDate <= endDate;
+          });
           
-        if (error) throw error;
-        data = res || [];
+          data = filteredData.map((item: any) => ({
+            fecha_creacion: item.fecha_creacion,
+            no_ticket: item.no_ticket,
+            nombre_cliente: item.nombre_cliente,
+            direccion: item.direccion,
+            telefono: item.telefono,
+            unidades: item.unidades,
+            estado: item.estado,
+            monto_de_compra: item.monto_de_compra
+          }));
+        }
         headers = ["Fecha", "Ticket", "Cliente", "Telefono", "Unidades", "Estado", "Monto"];
       } 
       else {
@@ -364,11 +380,11 @@ const AdminView: React.FC = () => {
               {tickets.map((ticket) => (
                 <tr key={ticket.folio} className="hover:bg-blue-50/20 transition-colors group">
                   <td className="px-6 py-4">
-                    <div className="font-black text-gray-900">{ticket.no_tiket}</div>
+                    <div className="font-black text-gray-900">{ticket.no_ticket}</div>
                     <div className="font-mono text-[10px] text-gray-400">{ticket.folio.substring(0,8)}...</div>
                   </td>
                   <td className="px-6 py-4 text-gray-600 font-medium text-xs">
-                    {ticket.nombre_cliente.split('|')[0].substring(0,30)}
+                    {ticket.nombre_cliente.substring(0,30)}
                   </td>
                   <td className="px-6 py-4 text-gray-500 text-xs">${ticket.monto_de_compra}</td>
                   <td className="px-6 py-4">
@@ -439,7 +455,7 @@ const AdminView: React.FC = () => {
             <div className="bg-blue-800 text-white p-6 flex justify-between items-center">
               <div>
                 <h4 className="text-xl font-black">Editar Pedido</h4>
-                <p className="text-blue-200 text-xs">Modificando: {editingTicket.no_tiket}</p>
+                <p className="text-blue-200 text-xs">Modificando: {editingTicket.no_ticket}</p>
               </div>
               <button onClick={() => setEditingTicket(null)} className="text-blue-300 hover:text-white transition-colors">
                 <i className="fas fa-times text-2xl"></i>
@@ -453,8 +469,8 @@ const AdminView: React.FC = () => {
                 <label className="block text-xs font-bold text-gray-500 uppercase mb-1">No. Ticket</label>
                 <input 
                   type="text" 
-                  value={editingTicket.no_tiket}
-                  onChange={e => setEditingTicket({ ...editingTicket, no_tiket: e.target.value })}
+                  value={editingTicket.no_ticket}
+                  onChange={e => setEditingTicket({ ...editingTicket, no_ticket: e.target.value })}
                   className="w-full p-3 border-2 border-gray-100 rounded-xl focus:border-blue-800 outline-none transition-all font-bold bg-gray-50 text-gray-900"
                 />
               </div>
@@ -555,7 +571,7 @@ const AdminView: React.FC = () => {
                         </div>
                         <div className="flex justify-between">
                           <span>TICKET:</span>
-                          <span className="font-black text-[11px]">{printOrder.no_tiket}</span>
+                          <span className="font-black text-[11px]">{printOrder.no_ticket}</span>
                         </div>
                       </div>
 
@@ -578,17 +594,8 @@ const AdminView: React.FC = () => {
                       {/* Datos de Entrega */}
                       <div className="border-t border-b border-black py-2 mb-2">
                         <p className="font-black mb-1 text-[9px] uppercase bg-black text-white inline-block px-1">DATOS DE ENTREGA:</p>
-                        {(() => {
-                          const parts = printOrder.nombre_cliente.split('|');
-                          const name = parts[0]?.trim();
-                          const address = parts[1]?.trim();
-                          return (
-                            <>
-                              <p className="uppercase text-[10px] leading-none font-black mb-1">{name}</p>
-                              {address && <p className="uppercase text-[9px] leading-tight mb-1">{address}</p>}
-                            </>
-                          );
-                        })()}
+                        <p className="uppercase text-[10px] leading-none font-black mb-1">{printOrder.nombre_cliente}</p>
+                        {printOrder.direccion && <p className="uppercase text-[9px] leading-tight mb-1">{printOrder.direccion}</p>}
                         <p className="mt-1 text-[10px] font-bold"><i className="fas fa-phone mr-1"></i> {printOrder.telefono}</p>
                       </div>
 

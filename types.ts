@@ -19,14 +19,15 @@ export enum TicketStatus {
 // Matches 'pedido' table in Supabase
 export interface Pedido {
   folio: string; // UUID
-  no_tiket: string;
-  nombre_cliente: string; // Includes address in our logic
+  no_ticket: string;
+  nombre_cliente: string;
+  direccion: string;
   telefono: string;
   monto_de_compra: number;
   unidades: number;
   costo_de_envio: number;
   estado: string;
-  created_at?: string;
+  fecha_creacion?: string;
   updated_at?: string;
   // Optional temp fields for printing
   tempUnit?: string;

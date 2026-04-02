@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { supabase } from '../services/supabaseClient';
+import { sheetDb } from '../services/sheetDbService';
 import { Pedido, TicketStatus } from '../types';
 
 const ShipmentView: React.FC = () => {
@@ -18,35 +18,45 @@ const ShipmentView: React.FC = () => {
   // Controls if we show the success/action panel instead of the form
   const [showActions, setShowActions] = useState(false);
 
-  // Fetch pending orders on mount and subscribe to changes
+  // Fetch pending orders on mount
   useEffect(() => {
     fetchPendingOrders();
+    // Polling every 10 seconds as a fallback for realtime
+    const interval = setInterval(() => {
+      fetchPendingOrders();
+    }, 10000);
 
-    const channel = supabase
-      .channel('pedido-updates')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'pedido' },
-        () => fetchPendingOrders()
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => clearInterval(interval);
   }, []);
 
   const fetchPendingOrders = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('pedido')
-        .select('*')
-        .eq('estado', TicketStatus.PENDING)
-        .order('created_at', { ascending: false });
-      
-      if (error) throw error;
-      if (data) setActiveOrders(data);
+      const data = await sheetDb.get('pedido', { estado: TicketStatus.PENDING });
+      if (data && Array.isArray(data)) {
+        // Parse numbers if needed, but for display string is mostly fine.
+        // Let's map it to match Pedido type
+        const parsedData = data.map((item: any) => {
+          // Normalize keys to lowercase and trim
+          const normalizedItem: any = {};
+          for (const key in item) {
+            normalizedItem[key.trim().toLowerCase()] = item[key];
+          }
+          return {
+            ...normalizedItem,
+            monto_de_compra: parseFloat(normalizedItem.monto_de_compra) || 0,
+            unidades: parseInt(normalizedItem.unidades) || 0,
+            costo_de_envio: parseFloat(normalizedItem.costo_de_envio) || 0
+          };
+        });
+        // Sort by fecha_creacion descending
+        parsedData.sort((a: any, b: any) => {
+          if (!a.fecha_creacion) return 1;
+          if (!b.fecha_creacion) return -1;
+          return new Date(b.fecha_creacion).getTime() - new Date(a.fecha_creacion).getTime();
+        });
+        setActiveOrders(parsedData);
+      }
     } catch (error) {
       console.error("Error fetching orders:", error);
     } finally {
@@ -72,29 +82,27 @@ const ShipmentView: React.FC = () => {
     }
     
     try {
-      const orderToPrint = activeOrders.find(o => o.folio === formData.folio);
+      const selectedFolio = formData.folio.trim();
+      
+      if (selectedFolio.startsWith('NO_FOLIO_')) {
+        alert("Este pedido no tiene un folio asignado en la base de datos y no puede ser embarcado. Por favor, asigne un folio primero.");
+        return;
+      }
+
+      const orderToPrint = activeOrders.find(o => o.folio && String(o.folio).trim() === selectedFolio);
       if (!orderToPrint) {
         alert("Error: No se encontró la información del pedido para imprimir.");
         return;
       }
 
-      const { error: updateError } = await supabase
-        .from('pedido')
-        .update({ estado: TicketStatus.IN_TRANSIT })
-        .eq('folio', formData.folio);
+      await sheetDb.update('pedido', 'folio', selectedFolio, { estado: TicketStatus.IN_TRANSIT });
 
-      if (updateError) throw updateError;
-
-      const { error: insertError } = await supabase
-        .from('embarque')
-        .insert([{
-            folio: formData.folio,
-            unidad: formData.unit,
-            placas: formData.plates,
-            chofer: formData.driver
-        }]);
-      
-      if (insertError) throw insertError;
+      await sheetDb.insert('embarcar', {
+        folio: selectedFolio,
+        unidad: formData.unit,
+        placas: formData.plates,
+        chofer: formData.driver
+      });
 
       setPrintOrder({
         ...orderToPrint,
@@ -130,9 +138,9 @@ const ShipmentView: React.FC = () => {
     }
     
     const opt = {
-      margin: 0, // Margen cero para aprovechar todo el papel
-      filename: `Embarque_${printOrder.no_tiket}.pdf`,
-      image: { type: 'jpeg', quality: 0.98 },
+      margin: [2, 2, 2, 2],
+      filename: `Embarque_${printOrder.folio}.pdf`,
+      image: { type: 'jpeg', quality: 1 },
       html2canvas: { scale: 2, useCORS: true },
       jsPDF: { unit: 'mm', format: [80, 200], orientation: 'portrait' }
     };
@@ -152,7 +160,7 @@ const ShipmentView: React.FC = () => {
 
     printWindow.document.write('<html><head><title>Imprimir Ticket</title>');
     printWindow.document.write('<script src="https://cdn.tailwindcss.com"></script>');
-    printWindow.document.write('<style>@page { size: 80mm auto; margin: 0; } body { margin: 0; padding: 0; }</style>');
+    printWindow.document.write('<style>@page { size: 80mm auto; margin: 0; } body { margin: 0; padding: 2mm; width: 76mm; }</style>');
     printWindow.document.write('</head><body class="bg-white">');
     // Clone node to avoid moving the original DOM element
     printWindow.document.write(content.innerHTML);
@@ -205,17 +213,17 @@ const ShipmentView: React.FC = () => {
                     className="w-full pl-10 p-3 border-2 border-gray-100 rounded-xl focus:border-blue-800 focus:ring-0 outline-none transition-all font-bold bg-gray-50 text-gray-900 appearance-none"
                   >
                     <option value="">-- Seleccione un Pedido --</option>
-                    {activeOrders.map(order => (
-                      <option key={order.folio} value={order.folio}>
-                        {order.no_tiket} - {order.nombre_cliente.substring(0, 25)}...
+                    {activeOrders.map((order, index) => (
+                      <option key={order.folio || `order-${index}`} value={order.folio || `NO_FOLIO_${index}`}>
+                        {order.folio ? '' : '[SIN FOLIO] '}{order.no_ticket} - {order.nombre_cliente?.substring(0, 25)}...
                       </option>
                     ))}
                   </select>
                 </div>
-                {formData.folio && activeOrders.find(o => o.folio === formData.folio) && (
+                {formData.folio && activeOrders.find(o => o.folio && String(o.folio).trim() === formData.folio.trim()) && (
                   <p className="text-xs text-blue-600 font-bold ml-2 mt-1 break-words">
                     <i className="fas fa-check-circle mr-1"></i> 
-                    Cliente: {activeOrders.find(o => o.folio === formData.folio)?.nombre_cliente}
+                    Cliente: {activeOrders.find(o => o.folio && String(o.folio).trim() === formData.folio.trim())?.nombre_cliente}
                   </p>
                 )}
               </div>
@@ -327,11 +335,11 @@ const ShipmentView: React.FC = () => {
       {/* --- Print Container --- */}
       {/* Hidden container, used as source for html2pdf and print */}
       {printOrder && (
-        <div id="print-container" className="hidden">
+        <div id="print-container" className="absolute left-[-9999px] top-[-9999px]">
            {/* Inner content for PDF/Print - Ancho optimizado para 80mm */}
           <div 
             id="ticket-content"
-            className="w-[80mm] mx-auto bg-white p-2 font-sans text-black"
+            className="w-[74mm] max-w-none bg-white p-2 font-sans text-black"
           >
             {/* Header con Logo CSS */}
             <div className="flex flex-col items-center justify-center mb-2 border-b-2 border-black pb-2">
@@ -361,7 +369,7 @@ const ShipmentView: React.FC = () => {
               </div>
               <div className="flex justify-between">
                 <span>TICKET:</span>
-                <span className="font-black text-[11px]">{printOrder.no_tiket}</span>
+                <span className="font-black text-[11px]">{printOrder.no_ticket}</span>
               </div>
             </div>
 
@@ -384,17 +392,8 @@ const ShipmentView: React.FC = () => {
             {/* Datos de Entrega */}
             <div className="border-t border-b border-black py-2 mb-2">
               <p className="font-black mb-1 text-[9px] uppercase bg-black text-white inline-block px-1">DATOS DE ENTREGA:</p>
-              {(() => {
-                const parts = printOrder.nombre_cliente.split('|');
-                const name = parts[0]?.trim();
-                const address = parts[1]?.trim();
-                return (
-                  <>
-                    <p className="uppercase text-[10px] leading-none font-black mb-1">{name}</p>
-                    {address && <p className="uppercase text-[9px] leading-tight mb-1">{address}</p>}
-                  </>
-                );
-              })()}
+              <p className="uppercase text-[10px] leading-none font-black mb-1">{printOrder.nombre_cliente}</p>
+              {printOrder.direccion && <p className="uppercase text-[9px] leading-tight mb-1">{printOrder.direccion}</p>}
               <p className="mt-1 text-[10px] font-bold"><i className="fas fa-phone mr-1"></i> {printOrder.telefono}</p>
             </div>
 
