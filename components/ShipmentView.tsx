@@ -1,443 +1,133 @@
-import React, { useState, useEffect } from 'react';
-import { sheetDb } from '../services/sheetDbService';
-import { Pedido, TicketStatus } from '../types';
+import React, { useEffect, useState } from 'react';
+import { api } from '../services/api';
+import { downloadPdf, money, printNode } from '../services/utils';
+import { Config, Estado, Pedido } from '../types';
+import Ticket from './Ticket';
 
-const ShipmentView: React.FC = () => {
-  const [activeOrders, setActiveOrders] = useState<Pedido[]>([]);
+const input = 'w-full p-3 border-2 border-gray-100 rounded-xl focus:border-blue-800 outline-none font-bold bg-gray-50 text-gray-900';
+const label = 'block text-xs font-bold text-gray-600 uppercase mb-1';
+
+/** Asigna unidad y chofer a un pedido pendiente e imprime el ticket de salida. */
+const ShipmentView: React.FC<{ config: Config }> = ({ config }) => {
+  const [orders, setOrders] = useState<Pedido[]>([]);
   const [loading, setLoading] = useState(false);
-  
-  const [formData, setFormData] = useState({
-    folio: '',
-    unit: '',
-    plates: '',
-    driver: ''
-  });
-  
-  // Stores the order to be printed
-  const [printOrder, setPrintOrder] = useState<Pedido | null>(null);
-  // Controls if we show the success/action panel instead of the form
-  const [showActions, setShowActions] = useState(false);
+  const [folio, setFolio] = useState('');
+  const [vehiculoId, setVehiculoId] = useState('');
+  const [unidad, setUnidad] = useState('');
+  const [placas, setPlacas] = useState('');
+  const [chofer, setChofer] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [printed, setPrinted] = useState<Pedido | null>(null);
 
-  // Fetch pending orders on mount
-  useEffect(() => {
-    fetchPendingOrders();
-    // Polling every 10 seconds as a fallback for realtime
-    const interval = setInterval(() => {
-      fetchPendingOrders();
-    }, 10000);
-
-    return () => clearInterval(interval);
-  }, []);
-
-  const fetchPendingOrders = async () => {
+  const load = async () => {
     setLoading(true);
-    try {
-      const data = await sheetDb.get('pedido', { estado: TicketStatus.PENDING });
-      if (data && Array.isArray(data)) {
-        // Parse numbers if needed, but for display string is mostly fine.
-        // Let's map it to match Pedido type
-        const parsedData = data.map((item: any) => {
-          // Normalize keys to lowercase and trim
-          const normalizedItem: any = {};
-          for (const key in item) {
-            normalizedItem[key.trim().toLowerCase()] = item[key];
-          }
-          return {
-            ...normalizedItem,
-            monto_de_compra: parseFloat(normalizedItem.monto_de_compra) || 0,
-            unidades: parseInt(normalizedItem.unidades) || 0,
-            costo_de_envio: parseFloat(normalizedItem.costo_de_envio) || 0
-          };
-        });
-        // Sort by fecha_creacion descending
-        parsedData.sort((a: any, b: any) => {
-          if (!a.fecha_creacion) return 1;
-          if (!b.fecha_creacion) return -1;
-          return new Date(b.fecha_creacion).getTime() - new Date(a.fecha_creacion).getTime();
-        });
-        setActiveOrders(parsedData);
-      }
-    } catch (error) {
-      console.error("Error fetching orders:", error);
-    } finally {
-      setLoading(false);
-    }
+    try { setOrders(await api.orders(Estado.PENDIENTE)); } catch (e: any) { alert(e.message); } finally { setLoading(false); }
   };
+  useEffect(() => { load(); }, []);
 
-  const handleChange = (field: string, value: string) => {
-    if (field === 'unit' || field === 'plates') {
-      if (!/^[a-zA-Z0-9\s-]*$/.test(value)) return;
-    }
-    if (field === 'driver') {
-      if (!/^[a-zA-Z\s]*$/.test(value)) return;
-    }
-    setFormData(prev => ({ ...prev, [field]: value }));
-  };
+  const order = orders.find(o => o.folio === folio);
+  const hayVehiculos = config.vehiculos.length > 0;
 
-  const handleSave = async (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.folio || !formData.unit || !formData.plates || !formData.driver) {
-      alert("Todos los campos son obligatorios");
-      return;
-    }
-    
+    if (!order) return alert('Selecciona un pedido.');
+    if (hayVehiculos && !vehiculoId) return alert('Elige la unidad.');
+    if (!hayVehiculos && !unidad.trim()) return alert('Escribe la unidad.');
+    if (!chofer.trim()) return alert('Escribe el nombre del chofer.');
+    setSaving(true);
     try {
-      const selectedFolio = formData.folio.trim();
-      
-      if (selectedFolio.startsWith('NO_FOLIO_')) {
-        alert("Este pedido no tiene un folio asignado en la base de datos y no puede ser embarcado. Por favor, asigne un folio primero.");
-        return;
-      }
-
-      const orderToPrint = activeOrders.find(o => o.folio && String(o.folio).trim() === selectedFolio);
-      if (!orderToPrint) {
-        alert("Error: No se encontró la información del pedido para imprimir.");
-        return;
-      }
-
-      await sheetDb.update('pedido', 'folio', selectedFolio, { estado: TicketStatus.IN_TRANSIT });
-
-      await sheetDb.insert('embarcar', {
-        folio: selectedFolio,
-        unidad: formData.unit,
-        placas: formData.plates,
-        chofer: formData.driver
-      });
-
-      setPrintOrder({
-        ...orderToPrint,
-        tempUnit: formData.unit,
-        tempDriver: formData.driver
-      });
-      
-      setFormData({ folio: '', unit: '', plates: '', driver: '' });
-      setShowActions(true);
-      fetchPendingOrders();
-
-    } catch (error: any) {
-      console.error("Error saving shipment:", error);
-      alert("Error al guardar el embarque: " + error.message);
+      const emb = await api.ship({ folio: order.folio, vehiculo_id: vehiculoId, chofer, unidad, placas });
+      setPrinted({ ...order, embarque: emb, estado: Estado.TRANSITO });
+      setFolio(''); setVehiculoId(''); setUnidad(''); setPlacas(''); setChofer('');
+      load();
+    } catch (err: any) {
+      alert('Error al guardar el embarque: ' + err.message);
+    } finally {
+      setSaving(false);
     }
   };
 
-  const handleDownloadPDF = () => {
-    if (!printOrder) return;
-
-    const element = document.getElementById('ticket-content');
-    if (!element) {
-      alert("No se encontró el ticket para generar PDF");
-      return;
-    }
-
-    // @ts-ignore
-    const html2pdf = window.html2pdf;
-
-    if (!html2pdf) {
-      alert("Librería PDF no cargada. Por favor recargue la página.");
-      return;
-    }
-    
-    const opt = {
-      margin: [2, 2, 2, 2],
-      filename: `Embarque_${printOrder.folio}.pdf`,
-      image: { type: 'jpeg', quality: 1 },
-      html2canvas: { scale: 2, useCORS: true },
-      jsPDF: { unit: 'mm', format: [80, 200], orientation: 'portrait' }
-    };
-
-    html2pdf().set(opt).from(element).save();
-  };
-
-  const handleWebPrint = () => {
-    const content = document.getElementById('print-container');
-    if (!content) return;
-
-    const printWindow = window.open('', '', 'height=800,width=600');
-    if (!printWindow) {
-        alert("Por favor permite las ventanas emergentes para imprimir.");
-        return;
-    }
-
-    printWindow.document.write('<html><head><title>Imprimir Ticket</title>');
-    printWindow.document.write('<script src="https://cdn.tailwindcss.com"></script>');
-    printWindow.document.write('<style>@page { size: 80mm auto; margin: 0; } body { margin: 0; padding: 2mm; width: 76mm; }</style>');
-    printWindow.document.write('</head><body class="bg-white">');
-    // Clone node to avoid moving the original DOM element
-    printWindow.document.write(content.innerHTML);
-    printWindow.document.write('</body></html>');
-    
-    printWindow.document.close();
-    printWindow.focus();
-
-    // Pequeño delay para asegurar que Tailwind cargue los estilos
-    setTimeout(() => {
-      printWindow.print();
-      printWindow.close();
-    }, 500);
-  };
-
-  const handleNewShipment = () => {
-    setPrintOrder(null);
-    setShowActions(false);
-  };
+  if (printed) {
+    return (
+      <div className="animate-fadeIn space-y-4 max-w-md mx-auto">
+        <div className="bg-white p-5 rounded-2xl shadow-xl border-t-4 border-green-600 text-center">
+          <i className="fas fa-check-circle text-4xl text-green-600 mb-2"></i>
+          <h2 className="text-xl font-black text-gray-800">Embarque generado · {printed.folio}</h2>
+          <p className="text-sm text-gray-500">El pedido pasó a "En Tránsito".</p>
+          <div className="grid grid-cols-2 gap-3 mt-4">
+            <button onClick={() => printNode('ship-ticket')} className="bg-gray-800 text-white font-bold py-3 rounded-xl"><i className="fas fa-print mr-2"></i>Imprimir</button>
+            <button onClick={() => downloadPdf('ship-ticket', `Embarque_${printed.folio}.pdf`)} className="bg-red-600 text-white font-bold py-3 rounded-xl"><i className="fas fa-file-pdf mr-2"></i>PDF</button>
+          </div>
+          <button onClick={() => setPrinted(null)} className="w-full mt-3 border border-gray-200 font-bold py-3 rounded-xl text-gray-600">Nuevo embarque</button>
+        </div>
+        <div className="flex justify-center bg-gray-200 p-4 rounded-2xl overflow-x-auto"><Ticket id="ship-ticket" order={printed} /></div>
+      </div>
+    );
+  }
 
   return (
-    <div className="animate-fadeIn pb-10">
-      
-      {/* UI WRAPPER */}
-      <div id="shipment-ui">
-        {!showActions ? (
-          /* --- Main Form UI --- */
-          <div className="bg-white p-6 rounded-2xl shadow-xl border-t-4 border-blue-800 max-w-2xl mx-auto">
-            <div className="flex items-center gap-4 mb-6 border-b border-gray-100 pb-4">
-              <div className="p-3 bg-blue-50 text-blue-800 rounded-xl">
-                <i className="fas fa-shipping-fast text-2xl"></i>
-              </div>
-              <div>
-                <h2 className="text-2xl font-black text-gray-800">Generar Embarque</h2>
-                <p className="text-sm text-gray-500">Asignación de unidad y chofer</p>
-              </div>
-            </div>
-
-            <form onSubmit={handleSave} className="space-y-5">
-              {/* Folio Selection */}
-              <div className="space-y-1">
-                <label className="block text-xs font-bold text-gray-600 uppercase">
-                  Seleccionar Pedido Pendiente {loading && <i className="fas fa-spinner fa-spin ml-2"></i>}
-                </label>
-                <div className="relative">
-                  <i className="fas fa-list-ol absolute left-4 top-4 text-gray-400"></i>
-                  <select 
-                    value={formData.folio}
-                    onChange={(e) => handleChange('folio', e.target.value)}
-                    className="w-full pl-10 p-3 border-2 border-gray-100 rounded-xl focus:border-blue-800 focus:ring-0 outline-none transition-all font-bold bg-gray-50 text-gray-900 appearance-none"
-                  >
-                    <option value="">-- Seleccione un Pedido --</option>
-                    {activeOrders.map((order, index) => (
-                      <option key={order.folio || `order-${index}`} value={order.folio || `NO_FOLIO_${index}`}>
-                        {order.folio ? '' : '[SIN FOLIO] '}{order.no_ticket} - {order.nombre_cliente?.substring(0, 25)}...
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                {formData.folio && activeOrders.find(o => o.folio && String(o.folio).trim() === formData.folio.trim()) && (
-                  <p className="text-xs text-blue-600 font-bold ml-2 mt-1 break-words">
-                    <i className="fas fa-check-circle mr-1"></i> 
-                    Cliente: {activeOrders.find(o => o.folio && String(o.folio).trim() === formData.folio.trim())?.nombre_cliente}
-                  </p>
-                )}
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                {/* Unit */}
-                <div className="space-y-1">
-                  <label className="block text-xs font-bold text-gray-600 uppercase">Unidad (Vehículo)</label>
-                  <div className="relative">
-                    <i className="fas fa-truck-pickup absolute left-4 top-4 text-gray-400"></i>
-                    <input 
-                      type="text" 
-                      value={formData.unit}
-                      onChange={(e) => handleChange('unit', e.target.value)}
-                      placeholder="Ejem: Nissan NP300"
-                      className="w-full pl-10 p-3 border-2 border-gray-100 rounded-xl focus:border-blue-800 focus:ring-0 outline-none transition-all font-bold uppercase bg-gray-50 text-gray-900"
-                    />
-                  </div>
-                </div>
-
-                {/* Plates */}
-                <div className="space-y-1">
-                  <label className="block text-xs font-bold text-gray-600 uppercase">Placas</label>
-                  <div className="relative">
-                    <i className="fas fa-minus-circle absolute left-4 top-4 text-gray-400"></i>
-                    <input 
-                      type="text" 
-                      value={formData.plates}
-                      onChange={(e) => handleChange('plates', e.target.value)}
-                      placeholder="ABC-123-D"
-                      className="w-full pl-10 p-3 border-2 border-gray-100 rounded-xl focus:border-blue-800 focus:ring-0 outline-none transition-all font-bold uppercase bg-gray-50 text-gray-900"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* Driver */}
-              <div className="space-y-1">
-                <label className="block text-xs font-bold text-gray-600 uppercase">Nombre del Chofer <span className="text-blue-500 text-[10px]">(Solo Letras)</span></label>
-                <div className="relative">
-                  <i className="fas fa-user-friends absolute left-4 top-4 text-gray-400"></i>
-                  <input 
-                    type="text" 
-                    value={formData.driver}
-                    onChange={(e) => handleChange('driver', e.target.value)}
-                    placeholder="Nombre Completo del Operador"
-                    className="w-full pl-10 p-3 border-2 border-gray-100 rounded-xl focus:border-blue-800 focus:ring-0 outline-none transition-all font-medium bg-gray-50 text-gray-900"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-4">
-                <button 
-                  type="submit"
-                  className="w-full bg-blue-800 hover:bg-blue-900 text-white font-bold py-4 rounded-xl transition-all shadow-lg shadow-blue-200 transform active:scale-[0.98] flex items-center justify-center gap-2 border-b-4 border-blue-950"
-                >
-                  <i className="fas fa-check-circle"></i>
-                  Generar y Guardar Embarque
-                </button>
-              </div>
-            </form>
+    <div className="animate-fadeIn">
+      <form onSubmit={submit} className="bg-white p-5 rounded-2xl shadow-xl border-t-4 border-blue-800 max-w-2xl mx-auto space-y-4">
+        <header className="flex items-center gap-3 border-b border-gray-100 pb-4">
+          <div className="p-3 bg-blue-50 text-blue-800 rounded-xl"><i className="fas fa-shipping-fast text-2xl"></i></div>
+          <div>
+            <h2 className="text-2xl font-black text-gray-800">Generar embarque</h2>
+            <p className="text-sm text-gray-500">Asignación de unidad y chofer</p>
           </div>
-        ) : (
-          /* --- Action Panel (After Success) --- */
-          <div className="animate-fadeIn max-w-md mx-auto">
-            <div className="bg-white rounded-3xl shadow-2xl p-8 border-t-8 border-green-500 text-center">
-              <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-6 shadow-inner">
-                <i className="fas fa-check text-4xl text-green-600"></i>
-              </div>
-              
-              <h3 className="text-2xl font-black text-gray-800 mb-2">¡Embarque Generado!</h3>
-              <p className="text-gray-500 mb-6 text-sm">El pedido ha pasado a estado <strong>"En Tránsito"</strong>.</p>
-              
-              <div className="space-y-3">
-                
-                {/* Botón Imprimir Web Directa */}
-                <button 
-                  onClick={handleWebPrint}
-                  className="w-full bg-blue-800 hover:bg-blue-900 text-white font-bold py-3 rounded-xl shadow-md transition-all flex items-center justify-center gap-2"
-                >
-                  <i className="fas fa-print"></i>
-                  Imprimir Ticket
-                </button>
+          <button type="button" onClick={load} className="ml-auto text-gray-400 hover:text-blue-800" title="Actualizar"><i className={`fas fa-sync ${loading ? 'fa-spin' : ''}`}></i></button>
+        </header>
 
-                {/* Botón Descargar PDF */}
-                <button 
-                  onClick={handleDownloadPDF}
-                  className="w-full bg-white border-2 border-red-500 text-red-600 hover:bg-red-50 font-bold py-3 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2"
-                >
-                  <i className="fas fa-file-pdf"></i>
-                  Guardar PDF
-                </button>
+        <div>
+          <label className={label}>Pedido pendiente ({orders.length})</label>
+          <select value={folio} onChange={e => setFolio(e.target.value)} className={input}>
+            <option value="">— Seleccionar —</option>
+            {orders.map(o => (
+              <option key={o.folio} value={o.folio}>
+                {o.folio} · {o.nombre_cliente} · {o.comunidad || o.direccion.slice(0, 20)}{o.urgente === 'SI' ? ' · URGENTE' : ''}{o.intentos > 0 ? ` · intento ${o.intentos + 1}` : ''}
+              </option>
+            ))}
+          </select>
+        </div>
 
-                <div className="border-t border-gray-100 my-4 pt-4">
-                  <button 
-                    onClick={handleNewShipment}
-                    className="w-full bg-white border-2 border-gray-200 hover:bg-gray-50 text-gray-600 font-bold py-3 rounded-xl transition-all"
-                  >
-                    <i className="fas fa-plus mr-2"></i>
-                    Nuevo Embarque
-                  </button>
-                </div>
-              </div>
+        {order && (
+          <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 text-sm space-y-1">
+            <p className="font-black text-gray-800">{order.nombre_cliente} · <span className="font-bold text-gray-500">{order.telefono}</span></p>
+            <p className="text-gray-600">{order.direccion}{order.comunidad ? ` — ${order.comunidad}` : ''}</p>
+            <div className="flex flex-wrap gap-2 pt-1 text-xs font-bold">
+              <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded">{order.km} km · {order.minutos} min</span>
+              <span className="bg-gray-200 px-2 py-1 rounded">{order.unidades} pzs</span>
+              <span className="bg-green-100 text-green-800 px-2 py-1 rounded">Envío {money(order.costo_de_envio)}</span>
+              {order.unidad_requerida && <span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded">Requiere: {order.unidad_requerida}</span>}
+              {order.lat && order.lng && (
+                <a href={`https://www.google.com/maps/dir/?api=1&destination=${order.lat},${order.lng}`} target="_blank" rel="noreferrer" className="bg-red-100 text-red-700 px-2 py-1 rounded">
+                  <i className="fas fa-location-arrow mr-1"></i>Abrir ruta
+                </a>
+              )}
             </div>
           </div>
         )}
-      </div>
 
-      {/* --- Print Container --- */}
-      {/* Hidden container, used as source for html2pdf and print */}
-      {printOrder && (
-        <div id="print-container" className="absolute left-[-9999px] top-[-9999px]">
-           {/* Inner content for PDF/Print - Ancho optimizado para 80mm */}
-          <div 
-            id="ticket-content"
-            className="w-[74mm] max-w-none bg-white p-2 font-sans text-black"
-          >
-            {/* Header con Logo CSS */}
-            <div className="flex flex-col items-center justify-center mb-2 border-b-2 border-black pb-2">
-              <div className="transform scale-90 origin-center mb-1">
-                  <div className="relative flex flex-col items-center justify-center">
-                    <div className="bg-black text-white font-black italic text-lg px-3 py-0.5 rounded-md shadow-sm transform -rotate-2 z-10 border border-white">
-                      Ferre
-                    </div>
-                    <div className="bg-black text-white font-black italic text-sm px-4 py-0.5 rounded shadow-sm transform rotate-0 -mt-1 ml-4 border border-white z-0">
-                      Don Nico
-                    </div>
-                  </div>
-              </div>
-              <p className="text-[9px] font-bold text-center leading-none mt-1">Jilotepec de Molina Enríquez</p>
-              <p className="mt-1 font-black text-[10px] border border-black inline-block px-2 py-0.5 uppercase">Embarque de Salida</p>
-            </div>
-
-            {/* Datos Generales */}
-            <div className="mb-2 space-y-0.5 text-[9px] leading-tight font-bold">
-              <div className="flex justify-between">
-                <span>FECHA:</span>
-                <span>{new Date().toLocaleDateString()} {new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>FOLIO:</span>
-                <span className="font-black">{printOrder.folio.slice(0,8)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>TICKET:</span>
-                <span className="font-black text-[11px]">{printOrder.no_ticket}</span>
-              </div>
-            </div>
-
-            {/* Datos Vehículo */}
-            <div className="border-t border-dotted border-black py-1 mb-2 space-y-0.5 text-[9px] uppercase leading-tight">
-              <div className="flex justify-between">
-                <span className="font-bold">UNIDAD:</span>
-                <span className="text-right max-w-[50mm] break-words">{printOrder.tempUnit || "N/A"}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="font-bold">PLACAS:</span>
-                <span className="text-right">{formData.plates || "N/A"}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="font-bold">CHOFER:</span>
-                <span className="text-right max-w-[50mm] break-words">{printOrder.tempDriver || "N/A"}</span>
-              </div>
-            </div>
-
-            {/* Datos de Entrega */}
-            <div className="border-t border-b border-black py-2 mb-2">
-              <p className="font-black mb-1 text-[9px] uppercase bg-black text-white inline-block px-1">DATOS DE ENTREGA:</p>
-              <p className="uppercase text-[10px] leading-none font-black mb-1">{printOrder.nombre_cliente}</p>
-              {printOrder.direccion && <p className="uppercase text-[9px] leading-tight mb-1">{printOrder.direccion}</p>}
-              <p className="mt-1 text-[10px] font-bold"><i className="fas fa-phone mr-1"></i> {printOrder.telefono}</p>
-            </div>
-
-            {/* Totales */}
-            <div className="space-y-0.5 text-right mb-4 text-[9px] font-bold">
-                <div className="flex justify-between">
-                <span>UNIDADES:</span>
-                <span>{printOrder.unidades} pzs</span>
-              </div>
-              <div className="flex justify-between">
-                <span>SUBTOTAL:</span>
-                <span>${printOrder.monto_de_compra.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between">
-                <span>ENVIO:</span>
-                <span>${printOrder.costo_de_envio.toFixed(2)}</span>
-              </div>
-              <div className="flex justify-between text-[11px] font-black border-t-2 border-black pt-1 mt-1">
-                <span>TOTAL A COBRAR:</span>
-                <span>${(printOrder.monto_de_compra + printOrder.costo_de_envio).toFixed(2)}</span>
-              </div>
-            </div>
-
-            {/* Firmas */}
-            <div className="mt-6 text-center">
-              {/* Firma Recibido */}
-              <div className="mb-6">
-                 <div className="h-8 mb-1 border-b border-black w-3/4 mx-auto"></div>
-                 <p className="text-[8px] font-bold uppercase">Firma de Recibido / Sello</p>
-              </div>
-
-              {/* Firma Seguridad Física */}
-              <div className="mb-4">
-                 <div className="h-8 mb-1 border-b border-black w-3/4 mx-auto"></div>
-                 <p className="text-[8px] font-bold uppercase">Validación Seguridad Física</p>
-              </div>
-            </div>
-
-            <div className="text-center text-[8px] mt-2 border-t border-black pt-1">
-              <p className="font-bold">*** FERRE DON NICO ***</p>
-            </div>
+        {hayVehiculos ? (
+          <div>
+            <label className={label}>Unidad</label>
+            <select value={vehiculoId} onChange={e => setVehiculoId(e.target.value)} className={input}>
+              <option value="">— Seleccionar —</option>
+              {config.vehiculos.map(v => <option key={v.id} value={v.id}>{v.unidad}{v.placas ? ` (${v.placas})` : ''}</option>)}
+            </select>
           </div>
-        </div>
-      )}
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className={label}>Unidad</label><input value={unidad} onChange={e => setUnidad(e.target.value.toUpperCase())} placeholder="NP300" className={input} /></div>
+            <div><label className={label}>Placas</label><input value={placas} onChange={e => setPlacas(e.target.value.toUpperCase())} className={input} /></div>
+            <p className="col-span-2 text-xs text-gray-400">Tip: carga tus unidades en la pestaña "Vehiculos" de la hoja para elegirlas de una lista.</p>
+          </div>
+        )}
+        <div><label className={label}>Chofer</label><input value={chofer} onChange={e => setChofer(e.target.value)} className={input} /></div>
+
+        <button type="submit" disabled={saving || !order} className="w-full bg-blue-800 hover:bg-blue-900 disabled:opacity-50 text-white font-black py-4 rounded-xl border-b-4 border-blue-950 flex justify-center items-center gap-2">
+          {saving ? <i className="fas fa-circle-notch fa-spin"></i> : <i className="fas fa-truck"></i>} Enviar a ruta
+        </button>
+      </form>
     </div>
   );
 };
