@@ -28,12 +28,9 @@ Cambiar el monto calculado requiere motivo y PIN de un autorizador (pestaña **A
 ### Paso 1 — Hoja de Google y script
 1. En Google Drive crea una **hoja de cálculo nueva** llamada `Ferre Nico Delivery`.
 2. Menú **Extensiones → Apps Script**. Borra lo que aparezca y pega todo el contenido de [`apps-script/Code.gs`](apps-script/Code.gs). Guarda (ícono de disco).
-3. A la izquierda, **Configuración del proyecto** (engrane) → **Propiedades del script** → *Agregar propiedad*:
-   - `API_KEY` = una clave que inventes (ej. `FDN-entregas-2026-xyz`). La usarás en el paso 2.
-   - Google Maps no necesita llave: viene incluido en Apps Script.
-4. Regresa a **Editor**, elige la función **`setup`** en la barra de arriba y presiona **Ejecutar**. Acepta los permisos (Avanzado → Ir a proyecto; pide acceso a la hoja, a Drive para las fotos y a servicios externos). Se crean las pestañas con sus columnas, las tarifas, las 59 comunidades y la carpeta `Delivery - Evidencias` para las fotos.
-5. En la hoja, pestaña **Autorizadores**, cambia los PIN `CAMBIAR-1/2/3` de Eryho, Itzel y Belén.
-6. **Implementar → Nueva implementación** → tipo **Aplicación web**:
+3. Elige la función **`setup`** en la barra de arriba y presiona **Ejecutar**. Acepta los permisos (Avanzado → Ir a proyecto; pide acceso a la hoja, a Drive para las fotos y a servicios externos). Se crean las pestañas con sus columnas, las tarifas, las 59 comunidades, la carpeta `Delivery - Evidencias` para las fotos y la clave de conexión **API_KEY**, que aparece en el *Registro de ejecución* (cópiala para el paso 2; también queda en Configuración del proyecto → Propiedades del script).
+4. En la hoja, pestaña **Autorizadores**, cambia los PIN `CAMBIAR-1/2/3` de Eryho, Itzel y Belén.
+5. **Implementar → Nueva implementación** → tipo **Aplicación web**:
    - Ejecutar como: **Yo**
    - Quién tiene acceso: **Cualquier usuario**
    - Implementar → copia la **URL que termina en `/exec`**.
@@ -49,7 +46,7 @@ Cambiar el monto calculado requiere motivo y PIN de un autorizador (pestaña **A
    - Build output directory: `dist`
 4. **Environment variables** (Variables de entorno), agrega:
    - `VITE_SHEETS_API_URL` = la URL `/exec` del paso 1
-   - `VITE_SHEETS_API_KEY` = la misma `API_KEY` del paso 1
+   - `VITE_SHEETS_API_KEY` = la clave `API_KEY` que mostró `setup` en el paso 1
    - `NODE_VERSION` = `20`
 5. **Save and Deploy**. Al terminar te da una dirección tipo `https://ferre-nico-delivery.pages.dev`.
 

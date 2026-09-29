@@ -8,10 +8,10 @@
  *
  * Instalación (una sola vez) — ver README.md, sección "Guía de instalación":
  *   1. En la hoja nueva: Extensiones > Apps Script. Borra lo que haya y pega este archivo.
- *   2. Configuración del proyecto (engrane) > Propiedades del script > agrega:
- *        API_KEY      = una clave inventada por ti (la misma va en VITE_SHEETS_API_KEY)
- *   3. Selecciona la función "setup" y presiona Ejecutar (acepta los permisos).
- *      Crea todas las pestañas con sus columnas, tarifas y comunidades.
+ *   2. Selecciona la función "setup" y presiona Ejecutar (acepta los permisos).
+ *      Crea las pestañas, tarifas y comunidades, y genera la clave API_KEY
+ *      (aparece en el Registro de ejecución; va en VITE_SHEETS_API_KEY).
+ *   3. (Opcional) La clave queda en Configuración del proyecto > Propiedades del script.
  *   4. En la pestaña "Autorizadores" cambia los PIN de cada persona.
  *   5. Implementar > Nueva implementación > Tipo: Aplicación web
  *        - Ejecutar como: Yo
@@ -159,10 +159,10 @@ function setup() {
   textColumns_(SHEETS.PEDIDOS, ['folio', 'no_ticket', 'no_vendedor', 'telefono']);
   textColumns_(SHEETS.AUTORIZADORES, ['pin']);
   getEvidenceFolder_();
+  // Clave de conexión app ↔ hoja: se genera sola la primera vez.
   var props = PropertiesService.getScriptProperties();
-  var missing = ['API_KEY'].filter(function (k) { return !props.getProperty(k); });
-  var msg = 'Listo: pestañas creadas.';
-  if (missing.length) msg += ' Falta agregar en Propiedades del script: ' + missing.join(', ');
+  if (!props.getProperty('API_KEY')) props.setProperty('API_KEY', 'FDN-' + Utilities.getUuid().replace(/-/g, '').slice(0, 20));
+  var msg = 'Listo: pestañas creadas. Copia esta clave en VITE_SHEETS_API_KEY (Cloudflare): ' + props.getProperty('API_KEY');
   Logger.log(msg);
   return msg;
 }
