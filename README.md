@@ -47,7 +47,7 @@ Cambiar el monto calculado requiere motivo y PIN de un autorizador (pestaña **A
 4. **Environment variables** (Variables de entorno), agrega:
    - `VITE_SHEETS_API_URL` = la URL `/exec` del paso 1
    - `VITE_SHEETS_API_KEY` = la clave `API_KEY` que mostró `setup` en el paso 1
-   - `NODE_VERSION` = `20`
+   - `NODE_VERSION` = `22`
 5. **Save and Deploy**. Al terminar te da una dirección tipo `https://ferre-nico-delivery.pages.dev`.
 
 Cada vez que se suba un cambio a la rama `main` en GitHub, Cloudflare vuelve a publicar solo.
