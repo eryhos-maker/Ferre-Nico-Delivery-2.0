@@ -2,12 +2,12 @@
 
 App de cobro y rastreo de entregas a domicilio de **Ferre Don Nico** (Jilotepec).
 
-- **Pedido**: el vendedor marca el destino (comunidad, dirección o pin en el mapa) y el sistema calcula el envío tipo Uber: **banderazo + km + minutos**, con descuentos y extras.
+- **Pedido**: el vendedor marca el destino (comunidad, dirección o pin en el mapa) y el sistema calcula con **Google Maps** la ruta real y el envío tipo Uber: **banderazo + km + minutos**, con descuentos y extras.
 - **Embarque**: asigna unidad y chofer, imprime el ticket de 80 mm.
 - **Entrega**: foto obligatoria, hora y ubicación; "No encontrado" con motivo, reprogramar o cancelar (con autorización).
 - **Admin**: entra con PIN, ve indicadores, gráficas, bitácora de ajustes y exporta a CSV.
 
-Todo corre sin costo: Google Sheets + Apps Script (datos), OpenRouteService + OpenStreetMap (mapa y rutas) y Cloudflare Pages (publicación).
+Todo corre sin costo y sin tarjeta: Google Sheets + Apps Script (datos), el servicio de **Google Maps incluido en Apps Script** (km y minutos de ruta, búsqueda de direcciones; 1,000 consultas diarias con cuenta Gmail, 10,000 con Workspace), OpenStreetMap (dibujo del mapa) y Cloudflare Pages (publicación).
 
 ## Fórmula de cobro
 
@@ -25,18 +25,13 @@ Cambiar el monto calculado requiere motivo y PIN de un autorizador (pestaña **A
 
 ## Guía de instalación (una sola vez)
 
-### Paso 1 — Llave gratuita de mapas (OpenRouteService)
-1. Entra a <https://openrouteservice.org/dev/#/signup> y crea tu cuenta con tu correo (no pide tarjeta).
-2. En el **Dashboard**, en "Request a token", elige **Standard**, ponle nombre `ferre-delivery` y crea el token.
-3. Copia la llave (una cadena larga). La usarás en el paso 2.
-
-### Paso 2 — Hoja de Google y script
+### Paso 1 — Hoja de Google y script
 1. En Google Drive crea una **hoja de cálculo nueva** llamada `Ferre Nico Delivery`.
 2. Menú **Extensiones → Apps Script**. Borra lo que aparezca y pega todo el contenido de [`apps-script/Code.gs`](apps-script/Code.gs). Guarda (ícono de disco).
 3. A la izquierda, **Configuración del proyecto** (engrane) → **Propiedades del script** → *Agregar propiedad*:
-   - `API_KEY` = una clave que inventes (ej. `FDN-entregas-2026-xyz`). La usarás en el paso 3.
-   - `ORS_API_KEY` = la llave del paso 1.
-4. Regresa a **Editor**, elige la función **`setup`** en la barra de arriba y presiona **Ejecutar**. Acepta los permisos (Avanzado → Ir a proyecto). Se crean las pestañas con sus columnas, las tarifas, las 59 comunidades y la carpeta `Delivery - Evidencias` para las fotos.
+   - `API_KEY` = una clave que inventes (ej. `FDN-entregas-2026-xyz`). La usarás en el paso 2.
+   - Google Maps no necesita llave: viene incluido en Apps Script.
+4. Regresa a **Editor**, elige la función **`setup`** en la barra de arriba y presiona **Ejecutar**. Acepta los permisos (Avanzado → Ir a proyecto; pide acceso a la hoja, a Drive para las fotos y a servicios externos). Se crean las pestañas con sus columnas, las tarifas, las 59 comunidades y la carpeta `Delivery - Evidencias` para las fotos.
 5. En la hoja, pestaña **Autorizadores**, cambia los PIN `CAMBIAR-1/2/3` de Eryho, Itzel y Belén.
 6. **Implementar → Nueva implementación** → tipo **Aplicación web**:
    - Ejecutar como: **Yo**
@@ -45,7 +40,7 @@ Cambiar el monto calculado requiere motivo y PIN de un autorizador (pestaña **A
 
 > Si después cambias el código: Implementar → Administrar implementaciones → lápiz → Versión: **Nueva versión**. Así la URL no cambia.
 
-### Paso 3 — Publicar en Cloudflare Pages
+### Paso 2 — Publicar en Cloudflare Pages
 1. Crea tu cuenta gratis en <https://dash.cloudflare.com/sign-up>.
 2. **Workers & Pages → Create → pestaña Pages → Connect to Git** (Import an existing Git repository). Autoriza GitHub y elige el repositorio `Ferre-Nico-Delivery-2.0`.
 3. Configuración de build:
@@ -53,18 +48,21 @@ Cambiar el monto calculado requiere motivo y PIN de un autorizador (pestaña **A
    - Build command: `npm run build`
    - Build output directory: `dist`
 4. **Environment variables** (Variables de entorno), agrega:
-   - `VITE_SHEETS_API_URL` = la URL `/exec` del paso 2
-   - `VITE_SHEETS_API_KEY` = la misma `API_KEY` del paso 2
+   - `VITE_SHEETS_API_URL` = la URL `/exec` del paso 1
+   - `VITE_SHEETS_API_KEY` = la misma `API_KEY` del paso 1
    - `NODE_VERSION` = `20`
 5. **Save and Deploy**. Al terminar te da una dirección tipo `https://ferre-nico-delivery.pages.dev`.
 
 Cada vez que se suba un cambio a la rama `main` en GitHub, Cloudflare vuelve a publicar solo.
 Si cambias una variable de entorno, ve a *Deployments → Retry deployment* para que tome efecto.
 
-### Paso 4 — Prueba rápida
+### Paso 3 — Prueba rápida
 1. Abre la app → **Pedido** → Comunidad: *Canalejas*. Debe aparecer el pin, los km/minutos y el desglose.
 2. Registra un pedido de prueba → **Embarque** → **Entrega** con una foto.
 3. **Admin** con tu PIN: revisa que aparezca con su foto y ubicación. Luego bórralo.
+
+### Si se llega al límite diario de Google Maps
+Con cuenta Gmail son 1,000 rutas al día (las rutas repetidas se reutilizan por 6 horas y no cuentan). Si se llegara al límite, la app avisa y se puede usar **"Capturar km a mano"** con autorización; al día siguiente se restablece.
 
 ### Después: cargar vehículos
 Pestaña **Vehiculos** de la hoja: `id` (V1, V2…), `unidad` (ej. NP300 Blanca), `placas`, `factor` (1 = sin recargo; 1.3 = 30% más), `activo` (SI/NO).

@@ -2,15 +2,14 @@
  * API Ferre Nico Delivery 3.0 — Ferre Don Nico
  * ---------------------------------------------
  * Conecta la app directamente con esta hoja de Google Sheets (sin SheetDB).
- * Calcula el costo de envío tipo Uber (banderazo + km + minutos) usando
- * OpenRouteService, guarda pedidos, embarques, evidencias (fotos en Drive)
+ * Calcula el costo de envío tipo Uber (banderazo + km + minutos) con las
+ * rutas de Google Maps (servicio incluido en Apps Script), guarda pedidos, embarques, evidencias (fotos en Drive)
  * y valida las claves de autorización del lado del servidor.
  *
  * Instalación (una sola vez) — ver README.md, sección "Guía de instalación":
  *   1. En la hoja nueva: Extensiones > Apps Script. Borra lo que haya y pega este archivo.
  *   2. Configuración del proyecto (engrane) > Propiedades del script > agrega:
  *        API_KEY      = una clave inventada por ti (la misma va en VITE_SHEETS_API_KEY)
- *        ORS_API_KEY  = tu llave gratuita de openrouteservice.org
  *   3. Selecciona la función "setup" y presiona Ejecutar (acepta los permisos).
  *      Crea todas las pestañas con sus columnas, tarifas y comunidades.
  *   4. En la pestaña "Autorizadores" cambia los PIN de cada persona.
@@ -161,7 +160,7 @@ function setup() {
   textColumns_(SHEETS.AUTORIZADORES, ['pin']);
   getEvidenceFolder_();
   var props = PropertiesService.getScriptProperties();
-  var missing = ['API_KEY', 'ORS_API_KEY'].filter(function (k) { return !props.getProperty(k); });
+  var missing = ['API_KEY'].filter(function (k) { return !props.getProperty(k); });
   var msg = 'Listo: pestañas creadas.';
   if (missing.length) msg += ' Falta agregar en Propiedades del script: ' + missing.join(', ');
   Logger.log(msg);
@@ -409,13 +408,16 @@ function computePrice(t, input) {
 }
 
 /* ------------------------------------------------------------------ */
-/* OpenRouteService (mapas gratuitos)                                  */
+/* Google Maps (servicio Maps incluido en Apps Script: sin llave ni     */
+/* tarjeta; se cuenta dentro de la cuota diaria de la cuenta Google)    */
 /* ------------------------------------------------------------------ */
 
-function orsKey_() {
-  var k = PropertiesService.getScriptProperties().getProperty('ORS_API_KEY');
-  if (!k) throw new Error('Falta ORS_API_KEY en Propiedades del script');
-  return k;
+function mapsError_(e) {
+  var m = String((e && e.message) || e);
+  if (/quota|cuota|Service invoked too many times/i.test(m)) {
+    return new Error('Se alcanzó el límite diario de consultas de Google Maps. Usa "Capturar km a mano" y avisa a Admin.');
+  }
+  return new Error('Google Maps no respondió (' + m + ')');
 }
 
 function route_(lat, lng) {
@@ -427,21 +429,28 @@ function route_(lat, lng) {
   var hit = cache.get(cacheKey);
   if (hit) return JSON.parse(hit);
 
-  var url = 'https://api.openrouteservice.org/v2/directions/driving-car?api_key=' + encodeURIComponent(orsKey_()) +
-    '&start=' + t.origen_lng + ',' + t.origen_lat + '&end=' + lng + ',' + lat;
-  var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-  var code = res.getResponseCode();
-  var body = {};
-  try { body = JSON.parse(res.getContentText()); } catch (e) { /* ignore */ }
-  if (code !== 200 || !body.features || !body.features.length) {
-    var msg = (body.error && (body.error.message || body.error)) || ('código ' + code);
-    if (String(msg).indexOf('routable point') > -1 || String(msg).indexOf('2010') > -1) {
-      throw new Error('El punto no está cerca de un camino. Acerca el pin a la calle o usa "Capturar km a mano".');
-    }
-    throw new Error('No se pudo calcular la ruta (' + msg + ')');
+  var dir;
+  try {
+    dir = Maps.newDirectionFinder()
+      .setOrigin(t.origen_lat, t.origen_lng)
+      .setDestination(lat, lng)
+      .setMode(Maps.DirectionFinder.Mode.DRIVING)
+      .setLanguage('es')
+      .setRegion('mx')
+      .getDirections();
+  } catch (e) {
+    throw mapsError_(e);
   }
-  var s = body.features[0].properties.summary || {};
-  var out = { km: (s.distance || 0) / 1000, minutos: (s.duration || 0) / 60 };
+  if (!dir || dir.status !== 'OK' || !dir.routes || !dir.routes.length) {
+    var st = dir && dir.status;
+    if (st === 'ZERO_RESULTS' || st === 'NOT_FOUND') {
+      throw new Error('Google no encontró un camino hasta ese punto. Acerca el pin a la calle o usa "Capturar km a mano".');
+    }
+    if (st === 'OVER_QUERY_LIMIT') throw mapsError_('quota');
+    throw new Error('No se pudo calcular la ruta (' + st + ')');
+  }
+  var leg = dir.routes[0].legs[0];
+  var out = { km: leg.distance.value / 1000, minutos: leg.duration.value / 60 };
   cache.put(cacheKey, JSON.stringify(out), 21600);
   return out;
 }
@@ -449,15 +458,22 @@ function route_(lat, lng) {
 function geocode_(text) {
   if (!text || String(text).trim().length < 3) return [];
   var t = getTarifas_();
-  var url = 'https://api.openrouteservice.org/geocode/search?api_key=' + encodeURIComponent(orsKey_()) +
-    '&text=' + encodeURIComponent(text) + '&boundary.country=MX&size=6' +
-    '&focus.point.lat=' + t.origen_lat + '&focus.point.lon=' + t.origen_lng +
-    '&boundary.circle.lat=' + t.origen_lat + '&boundary.circle.lon=' + t.origen_lng + '&boundary.circle.radius=80';
-  var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-  if (res.getResponseCode() !== 200) throw new Error('No se pudo buscar la dirección');
-  var body = JSON.parse(res.getContentText());
-  return (body.features || []).map(function (f) {
-    return { label: f.properties.label, lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0] };
+  var res;
+  try {
+    // Prioriza resultados en ~70 km alrededor de la tienda.
+    res = Maps.newGeocoder()
+      .setLanguage('es')
+      .setRegion('mx')
+      .setBounds(t.origen_lat - 0.6, t.origen_lng - 0.6, t.origen_lat + 0.6, t.origen_lng + 0.6)
+      .geocode(String(text));
+  } catch (e) {
+    throw mapsError_(e);
+  }
+  if (!res || (res.status !== 'OK' && res.status !== 'ZERO_RESULTS')) {
+    throw new Error('No se pudo buscar la dirección (' + (res && res.status) + ')');
+  }
+  return (res.results || []).slice(0, 6).map(function (r) {
+    return { label: r.formatted_address, lat: r.geometry.location.lat, lng: r.geometry.location.lng };
   });
 }
 
@@ -469,7 +485,7 @@ function locateCommunity_(nombre) {
   if (!c) throw new Error('Comunidad no encontrada');
   if (c.lat !== '' && c.lng !== '') return { lat: num_(c.lat), lng: num_(c.lng), guardado: true };
   var clean = String(nombre).replace(/\(.*?\)/g, '').trim();
-  var hits = geocode_(clean + ', Jilotepec, Estado de México');
+  var hits = geocode_(clean + ', Jilotepec, Estado de México, México');
   if (!hits.length) hits = geocode_(clean);
   if (!hits.length) return null;
   var h = hits[0];
