@@ -1,651 +1,306 @@
-import React, { useState, useEffect } from 'react';
-import { sheetDb } from '../services/sheetDbService';
-import { Pedido, TicketStatus } from '../types';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { api } from '../services/api';
+import { downloadCsv, downloadPdf, fmtDate, localDay, money, printNode, statusStyle } from '../services/utils';
+import { Bitacora, Config, Estado, Pedido } from '../types';
+import Ticket from './Ticket';
 
-const AdminView: React.FC = () => {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [password, setPassword] = useState('');
-  const [tickets, setTickets] = useState<Pedido[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [editingTicket, setEditingTicket] = useState<Pedido | null>(null);
+const TOKEN_KEY = 'fnd_admin_token';
+const safeGet = (k: string) => { try { return sessionStorage.getItem(k); } catch { return null; } };
+const safeSet = (k: string, v: string | null) => { try { v ? sessionStorage.setItem(k, v) : sessionStorage.removeItem(k); } catch { /* sin almacenamiento */ } };
 
-  // Print States
-  const [printOrder, setPrintOrder] = useState<Pedido | null>(null);
-  const [printShipmentData, setPrintShipmentData] = useState<{unidad: string, placas: string, chofer: string} | null>(null);
+const today = () => localDay();
+const monthStart = () => { const d = new Date(); return localDay(new Date(d.getFullYear(), d.getMonth(), 1)); };
 
-  // States for Report Generation
-  const [reportType, setReportType] = useState<'orders' | 'shipments' | 'evidence'>('orders');
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
-  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+const AdminView: React.FC<{ config: Config }> = ({ config }) => {
+  const [token, setToken] = useState<string | null>(safeGet(TOKEN_KEY));
+  const [who, setWho] = useState(safeGet(TOKEN_KEY + '_who') || '');
+  const [nombre, setNombre] = useState(config.autorizadores[0] || '');
+  const [pin, setPin] = useState('');
+  const [loggingIn, setLoggingIn] = useState(false);
 
-  useEffect(() => {
-    if (isLoggedIn) {
-      fetchTickets();
-      // Set default report dates (current month)
-      const date = new Date();
-      const firstDay = new Date(date.getFullYear(), date.getMonth(), 1).toISOString().split('T')[0];
-      const currentDay = date.toISOString().split('T')[0];
-      setStartDate(firstDay);
-      setEndDate(currentDay);
-    }
-  }, [isLoggedIn]);
+  const [pedidos, setPedidos] = useState<Pedido[]>([]);
+  const [bitacora, setBitacora] = useState<Bitacora[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [from, setFrom] = useState(monthStart());
+  const [to, setTo] = useState(today());
+  const [filtroEstado, setFiltroEstado] = useState('');
+  const [tab, setTab] = useState<'pedidos' | 'bitacora' | 'tarifas'>('pedidos');
+  const [detail, setDetail] = useState<Pedido | null>(null);
+  const [editing, setEditing] = useState<Pedido | null>(null);
 
-  const fetchTickets = async () => {
-    setIsLoading(true);
+  const logout = () => { setToken(null); safeSet(TOKEN_KEY, null); safeSet(TOKEN_KEY + '_who', null); };
+
+  const load = async (tk = token) => {
+    if (!tk) return;
+    setLoading(true);
     try {
-      const data = await sheetDb.get('pedido');
-      if (data && Array.isArray(data)) {
-        const parsedData = data.map((item: any) => ({
-          ...item,
-          monto_de_compra: parseFloat(item.monto_de_compra) || 0,
-          unidades: parseInt(item.unidades) || 0,
-          costo_de_envio: parseFloat(item.costo_de_envio) || 0
-        }));
-        parsedData.sort((a: any, b: any) => {
-          if (!a.fecha_creacion) return 1;
-          if (!b.fecha_creacion) return -1;
-          return new Date(b.fecha_creacion).getTime() - new Date(a.fecha_creacion).getTime();
-        });
-        setTickets(parsedData);
-      }
-    } catch (error) {
-      console.error("Error fetching tickets:", error);
-    }
-    setIsLoading(false);
-  };
-
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (password === 'FerreNico25') {
-      setIsLoggedIn(true);
-    } else {
-      alert("Clave de administrador incorrecta");
-    }
-  };
-
-  const updateTicket = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingTicket) return;
-    
-    try {
-      await sheetDb.update('pedido', 'folio', editingTicket.folio, { 
-        estado: editingTicket.estado,
-        no_ticket: editingTicket.no_ticket,
-        monto_de_compra: editingTicket.monto_de_compra
-      });
-      alert("Datos actualizados correctamente.");
-      setEditingTicket(null);
-      fetchTickets();
-    } catch (error: any) {
-      alert("Error al actualizar: " + error.message);
-    }
-  };
-
-  const deleteTicket = async (folio: string) => {
-    if (window.confirm("¿Está seguro de que desea ELIMINAR este pedido permanentemente? Esta acción no se puede deshacer.")) {
-      try {
-        // 1. Eliminar evidencias relacionadas primero (para evitar error de FK)
-        try {
-          await sheetDb.delete('evidencias_entrega', 'folio', folio);
-        } catch (evidenceError: any) {
-          console.warn("Nota: No se pudieron borrar evidencias (o no existían):", evidenceError.message);
-        }
-
-        // 2. Eliminar embarque relacionado
-        try {
-          await sheetDb.delete('embarcar', 'folio', folio);
-        } catch (shipmentError: any) {
-          console.warn("Nota: No se pudo borrar embarque (o no existía):", shipmentError.message);
-        }
-
-        // 3. Eliminar el pedido principal
-        await sheetDb.delete('pedido', 'folio', folio);
-
-        alert("Pedido eliminado correctamente.");
-        fetchTickets();
-      } catch (error: any) {
-        console.error("Error al eliminar:", error);
-        alert("Error al eliminar: " + error.message);
-      }
-    }
-  };
-
-  // --- Print Logic ---
-  const openPrintModal = async (ticket: Pedido) => {
-    // Fetch shipment details if they exist
-    try {
-      const data = await sheetDb.get('embarcar', { folio: ticket.folio });
-      if (data && Array.isArray(data) && data.length > 0) {
-        setPrintShipmentData(data[0]);
-      } else {
-        setPrintShipmentData({ unidad: 'N/A', placas: 'N/A', chofer: 'N/A' });
-      }
-    } catch (error) {
-      setPrintShipmentData({ unidad: 'N/A', placas: 'N/A', chofer: 'N/A' });
-    }
-    setPrintOrder(ticket);
-  };
-
-  const handleWebPrint = () => {
-    const content = document.getElementById('admin-ticket-content');
-    if (!content) return;
-
-    const printWindow = window.open('', '', 'height=800,width=600');
-    if (!printWindow) {
-        alert("Por favor permite las ventanas emergentes para imprimir.");
-        return;
-    }
-
-    printWindow.document.write('<html><head><title>Imprimir Ticket</title>');
-    printWindow.document.write('<script src="https://cdn.tailwindcss.com"></script>');
-    printWindow.document.write('<style>@page { size: 80mm auto; margin: 0; } body { margin: 0; padding: 0; }</style>');
-    printWindow.document.write('</head><body class="bg-white">');
-    printWindow.document.write(content.innerHTML);
-    printWindow.document.write('</body></html>');
-    
-    printWindow.document.close();
-    printWindow.focus();
-
-    setTimeout(() => {
-      printWindow.print();
-      printWindow.close();
-    }, 500);
-  };
-
-  const handleDownloadPDF = () => {
-    if (!printOrder) return;
-    const element = document.getElementById('admin-ticket-content');
-    if (!element) return;
-
-    // @ts-ignore
-    const html2pdf = window.html2pdf;
-    if (!html2pdf) {
-      alert("Librería PDF no cargada.");
-      return;
-    }
-    
-    const opt = {
-      margin: 0,
-      filename: `Embarque_${printOrder.no_tiket}.pdf`,
-      image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true },
-      jsPDF: { unit: 'mm', format: [80, 200], orientation: 'portrait' }
-    };
-
-    html2pdf().set(opt).from(element).save();
-  };
-  // -------------------
-
-  const generateReport = async () => {
-    if (!startDate || !endDate) {
-      alert("Por favor seleccione ambas fechas para el reporte.");
-      return;
-    }
-
-    setIsGeneratingReport(true);
-    try {
-      let data: any[] = [];
-      let headers: string[] = [];
-      
-      if (reportType === 'orders') {
-        const res = await sheetDb.get('pedido');
-        if (res && Array.isArray(res)) {
-          const filteredData = res.filter((item: any) => {
-            if (!item.fecha_creacion) return false;
-            const itemDate = item.fecha_creacion.split('T')[0];
-            return itemDate >= startDate && itemDate <= endDate;
-          });
-          
-          data = filteredData.map((item: any) => ({
-            fecha_creacion: item.fecha_creacion,
-            no_ticket: item.no_ticket,
-            nombre_cliente: item.nombre_cliente,
-            direccion: item.direccion,
-            telefono: item.telefono,
-            unidades: item.unidades,
-            estado: item.estado,
-            monto_de_compra: item.monto_de_compra
-          }));
-        }
-        headers = ["Fecha", "Ticket", "Cliente", "Telefono", "Unidades", "Estado", "Monto"];
-      } 
-      else {
-          alert("Función de reporte completa en desarrollo.");
-          setIsGeneratingReport(false);
-          return;
-      }
-
-      const csvContent = "data:text/csv;charset=utf-8," 
-        + headers.join(",") + "\n" 
-        + data.map(row => Object.values(row).join(",")).join("\n");
-        
-      const encodedUri = encodeURI(csvContent);
-      const link = document.createElement("a");
-      link.setAttribute("href", encodedUri);
-      link.setAttribute("download", `reporte_${reportType}_${startDate}.csv`);
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-
-    } catch (error: any) {
-      console.error("Error generating report:", error);
-      alert("Error: " + error.message);
+      const d = await api.adminData(tk);
+      setPedidos(d.pedidos);
+      setBitacora(d.bitacora);
+    } catch (e: any) {
+      if (/Sesión/.test(e.message)) logout();
+      alert(e.message);
     } finally {
-      setIsGeneratingReport(false);
+      setLoading(false);
+    }
+  };
+  useEffect(() => { if (token) load(); }, [token]);
+
+  const login = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoggingIn(true);
+    try {
+      const r = await api.login({ nombre, pin });
+      safeSet(TOKEN_KEY, r.token); safeSet(TOKEN_KEY + '_who', r.nombre);
+      setWho(r.nombre); setToken(r.token); setPin('');
+    } catch (err: any) {
+      alert(err.message);
+    } finally {
+      setLoggingIn(false);
     }
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case TicketStatus.DELIVERED: return 'bg-green-100 text-green-700 border-green-200';
-      case TicketStatus.IN_TRANSIT: return 'bg-blue-100 text-blue-700 border-blue-200';
-      case TicketStatus.PENDING: return 'bg-yellow-100 text-yellow-700 border-yellow-200';
-      case TicketStatus.NOT_FOUND: return 'bg-red-100 text-red-700 border-red-200';
-      default: return 'bg-gray-100 text-gray-700 border-gray-200';
-    }
-  };
+  const inRange = useMemo(() => pedidos.filter(p => {
+    const d = localDay(p.fecha_creacion);
+    return d >= from && d <= to && (!filtroEstado || p.estado === filtroEstado);
+  }), [pedidos, from, to, filtroEstado]);
 
-  const chartData = [
-    { name: 'Entregados', value: tickets.filter(t => t.estado === TicketStatus.DELIVERED).length },
-    { name: 'En Tránsito', value: tickets.filter(t => t.estado === TicketStatus.IN_TRANSIT).length },
-    { name: 'Pendientes', value: tickets.filter(t => t.estado === TicketStatus.PENDING).length },
-    { name: 'Incidencias', value: tickets.filter(t => t.estado === TicketStatus.NOT_FOUND).length },
+  const activos = inRange.filter(p => p.estado !== Estado.CANCELADO);
+  const kpi = {
+    pedidos: activos.length,
+    envio: activos.reduce((s, p) => s + p.costo_de_envio, 0),
+    calculado: activos.reduce((s, p) => s + p.envio_calculado, 0),
+    ajustes: activos.filter(p => p.autorizo && p.costo_de_envio !== p.envio_calculado).length,
+    entregados: activos.filter(p => p.estado === Estado.ENTREGADO).length,
+    km: activos.reduce((s, p) => s + p.km, 0)
+  };
+  const conTabla = activos.filter(p => p.precio_tabla !== '' && p.precio_tabla !== undefined && !isNaN(Number(p.precio_tabla)));
+  const difTabla = conTabla.reduce((s, p) => s + (p.costo_de_envio - Number(p.precio_tabla)), 0);
+
+  const chartEstados = [
+    { name: 'Pendiente', value: inRange.filter(p => p.estado === Estado.PENDIENTE).length, color: '#ca8a04' },
+    { name: 'En tránsito', value: inRange.filter(p => p.estado === Estado.TRANSITO).length, color: '#1e40af' },
+    { name: 'Entregado', value: inRange.filter(p => p.estado === Estado.ENTREGADO).length, color: '#16a34a' },
+    { name: 'No encontrado', value: inRange.filter(p => p.estado === Estado.NO_ENCONTRADO).length, color: '#dc2626' },
+    { name: 'Cancelado', value: inRange.filter(p => p.estado === Estado.CANCELADO).length, color: '#9ca3af' }
   ];
 
-  const COLORS = ['#16a34a', '#1e40af', '#ca8a04', '#dc2626'];
+  const porDia = useMemo(() => {
+    const m: Record<string, number> = {};
+    activos.forEach(p => { const d = localDay(p.fecha_creacion).slice(5, 10); m[d] = (m[d] || 0) + p.costo_de_envio; });
+    return Object.keys(m).sort().map(d => ({ dia: d.split('-').reverse().join('/'), envio: m[d] }));
+  }, [activos]);
 
-  if (!isLoggedIn) {
+  const saveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editing || !token) return;
+    try {
+      await api.updateOrder(token, editing.folio, {
+        no_ticket: editing.no_ticket, monto_de_compra: editing.monto_de_compra, estado: editing.estado,
+        costo_de_envio: editing.costo_de_envio, telefono: editing.telefono, direccion: editing.direccion
+      });
+      setEditing(null);
+      load();
+    } catch (err: any) { alert(err.message); }
+  };
+
+  const remove = async (p: Pedido) => {
+    if (!token || !window.confirm(`¿Eliminar ${p.folio} permanentemente? Queda registrado en la bitácora.`)) return;
+    try { await api.deleteOrder(token, p.folio); load(); } catch (e: any) { alert(e.message); }
+  };
+
+  const exportPedidos = () => downloadCsv(inRange.map(p => ({
+    folio: p.folio, fecha: fmtDate(p.fecha_creacion), ticket: p.no_ticket, vendedor: p.no_vendedor, cliente: p.nombre_cliente,
+    telefono: p.telefono, comunidad: p.comunidad, direccion: p.direccion, km: p.km, minutos: p.minutos, compra: p.monto_de_compra,
+    unidades: p.unidades, urgente: p.urgente, zona_dificil: p.zona_dificil, envio_calculado: p.envio_calculado, descuento: p.descuento,
+    envio_cobrado: p.costo_de_envio, precio_tabla: p.precio_tabla, autorizo: p.autorizo, motivo_ajuste: p.ajuste_motivo,
+    estado: p.estado, intentos: p.intentos, unidad: p.embarque?.unidad || '', chofer: p.embarque?.chofer || ''
+  })), `pedidos_${from}_a_${to}.csv`);
+
+  if (!token) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[400px] animate-fadeIn">
-        <div className="w-full max-w-md bg-white p-8 rounded-3xl shadow-2xl border-t-4 border-blue-800">
-          <div className="text-center mb-8">
-            <div className="inline-flex p-4 bg-blue-800 text-white rounded-2xl mb-4">
-              <i className="fas fa-lock text-2xl"></i>
-            </div>
-            <h2 className="text-2xl font-black text-gray-800">Acceso Restringido</h2>
-            <p className="text-gray-500">Ingrese su clave de administrador</p>
+      <div className="flex justify-center animate-fadeIn">
+        <form onSubmit={login} className="w-full max-w-md bg-white p-8 rounded-3xl shadow-2xl border-t-4 border-blue-800 space-y-4">
+          <div className="text-center">
+            <div className="inline-flex p-4 bg-blue-800 text-white rounded-2xl mb-3"><i className="fas fa-lock text-2xl"></i></div>
+            <h2 className="text-2xl font-black text-gray-800">Administración</h2>
+            <p className="text-gray-500 text-sm">Entra con tu PIN de autorizador</p>
           </div>
-          <form onSubmit={handleLogin} className="space-y-4">
-            <input 
-              type="password" 
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              className="w-full p-4 border-2 border-gray-200 rounded-xl focus:border-blue-800 focus:ring-0 text-center text-2xl tracking-widest outline-none transition-all bg-gray-50 text-gray-900"
-              autoFocus
-            />
-            <button 
-              type="submit"
-              className="w-full bg-blue-800 hover:bg-blue-900 text-white font-bold py-4 rounded-xl transition-all shadow-lg transform active:scale-95 border-b-4 border-blue-950"
-            >
-              Entrar al Sistema
-            </button>
-          </form>
-        </div>
+          <select value={nombre} onChange={e => setNombre(e.target.value)} className="w-full p-4 border-2 border-gray-100 rounded-2xl font-bold bg-gray-50">
+            {config.autorizadores.map(a => <option key={a}>{a}</option>)}
+          </select>
+          <input type="password" inputMode="numeric" value={pin} onChange={e => setPin(e.target.value)} placeholder="PIN"
+            className="w-full p-4 border-2 border-gray-100 rounded-2xl font-black text-center tracking-[0.5em] bg-gray-50" />
+          <button disabled={loggingIn} className="w-full bg-blue-800 text-white font-black py-4 rounded-2xl flex justify-center gap-2 items-center">
+            {loggingIn && <i className="fas fa-circle-notch fa-spin"></i>} Entrar
+          </button>
+        </form>
       </div>
     );
   }
 
+  const Kpi = ({ l, v, sub, icon }: { l: string; v: string; sub?: string; icon: string }) => (
+    <div className="bg-white rounded-2xl p-4 shadow border border-gray-100">
+      <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest"><i className={`fas ${icon} mr-1`}></i>{l}</p>
+      <p className="text-2xl font-black text-gray-800">{v}</p>
+      {sub && <p className="text-[11px] text-gray-500">{sub}</p>}
+    </div>
+  );
+
   return (
-    <div className="space-y-6 animate-fadeIn pb-12">
-      {isLoading && <p className="text-center text-gray-500">Cargando datos de Supabase...</p>}
-      
-      {/* Stats Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        {chartData.map((item, i) => (
-          <div key={item.name} className={`bg-white p-4 rounded-2xl shadow-sm border-l-4`} style={{ borderLeftColor: COLORS[i] }}>
-            <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">{item.name}</p>
-            <p className="text-2xl font-black">{item.value}</p>
-          </div>
-        ))}
+    <div className="animate-fadeIn space-y-5">
+      <div className="flex flex-wrap items-end gap-3 bg-white p-4 rounded-2xl shadow">
+        <div><label className="block text-[10px] font-black text-gray-400 uppercase">Desde</label><input type="date" value={from} onChange={e => setFrom(e.target.value)} className="p-2 border rounded-lg text-sm" /></div>
+        <div><label className="block text-[10px] font-black text-gray-400 uppercase">Hasta</label><input type="date" value={to} onChange={e => setTo(e.target.value)} className="p-2 border rounded-lg text-sm" /></div>
+        <div>
+          <label className="block text-[10px] font-black text-gray-400 uppercase">Estado</label>
+          <select value={filtroEstado} onChange={e => setFiltroEstado(e.target.value)} className="p-2 border rounded-lg text-sm">
+            <option value="">Todos</option>{Object.values(Estado).map(s => <option key={s}>{s}</option>)}
+          </select>
+        </div>
+        <button onClick={() => load()} className="p-2 px-3 rounded-lg bg-gray-100 text-gray-600"><i className={`fas fa-sync ${loading ? 'fa-spin' : ''}`}></i></button>
+        <button onClick={exportPedidos} className="p-2 px-3 rounded-lg bg-green-600 text-white text-sm font-bold"><i className="fas fa-file-csv mr-1"></i>Exportar</button>
+        <div className="ml-auto text-right text-xs text-gray-500">{who}<button onClick={logout} className="ml-2 text-red-600 font-bold">Salir</button></div>
       </div>
 
-      {/* Report Generator Section */}
-      <div className="bg-white p-6 rounded-2xl shadow-md border border-gray-100">
-        <h3 className="text-lg font-bold flex items-center gap-2 text-gray-800 mb-4">
-          <i className="fas fa-file-excel text-green-600"></i>
-          Generar Reporte Excel
-        </h3>
-        
-        <div className="flex flex-col md:flex-row items-end gap-4">
-          <div className="w-full md:w-auto flex-1">
-            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Tipo de Reporte</label>
-            <select 
-              value={reportType}
-              onChange={(e) => setReportType(e.target.value as any)}
-              className="w-full p-2 border-2 border-gray-100 rounded-lg focus:border-blue-800 outline-none text-sm font-medium bg-gray-50 text-gray-900"
-            >
-              <option value="orders">Pedidos (General)</option>
-              <option value="shipments">Embarques</option>
-              <option value="evidence">Evidencias</option>
-            </select>
-          </div>
-          <div className="w-full md:w-auto">
-            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Fecha Inicio</label>
-            <input 
-              type="date" 
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="w-full p-2 border-2 border-gray-100 rounded-lg focus:border-blue-800 outline-none text-sm font-medium bg-gray-50 text-gray-900"
-            />
-          </div>
-          <div className="w-full md:w-auto">
-            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Fecha Fin</label>
-            <input 
-              type="date" 
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              className="w-full p-2 border-2 border-gray-100 rounded-lg focus:border-blue-800 outline-none text-sm font-medium bg-gray-50 text-gray-900"
-            />
-          </div>
-          <button 
-            onClick={generateReport}
-            disabled={isGeneratingReport}
-            className="w-full md:w-auto px-6 py-2 bg-green-600 hover:bg-green-700 text-white font-bold rounded-xl shadow-md transition-all flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            {isGeneratingReport ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-download"></i>}
-            Descargar
-          </button>
-        </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <Kpi l="Pedidos" v={String(kpi.pedidos)} sub={`${kpi.entregados} entregados`} icon="fa-box" />
+        <Kpi l="Envío cobrado" v={money(kpi.envio)} sub={`Promedio ${money(kpi.pedidos ? kpi.envio / kpi.pedidos : 0)}`} icon="fa-dollar-sign" />
+        <Kpi l="Ajustes autorizados" v={String(kpi.ajustes)} sub={`Diferencia ${money(kpi.envio - kpi.calculado)}`} icon="fa-user-shield" />
+        <Kpi l="Vs. tabla anterior" v={money(difTabla)} sub={`${conTabla.length} pedidos con comunidad · ${Math.round(kpi.km)} km`} icon="fa-table" />
       </div>
 
-      {/* Table Section */}
-      <div className="bg-white p-6 rounded-2xl shadow-md border border-gray-100 overflow-hidden">
-        <div className="flex justify-between items-center mb-6">
-          <h3 className="text-lg font-bold flex items-center gap-2 text-gray-800">
-            <i className="fas fa-list-check text-blue-800"></i>
-            Bitácora de Pedidos
-          </h3>
-          <button 
-            onClick={fetchTickets}
-            className="bg-gray-100 hover:bg-gray-200 text-gray-600 px-4 py-2 rounded-lg text-sm font-bold transition-colors"
-          >
-            <i className="fas fa-sync mr-2"></i>Actualizar
-          </button>
+      <div className="grid md:grid-cols-2 gap-4">
+        <div className="bg-white p-4 rounded-2xl shadow h-64">
+          <p className="text-xs font-black text-gray-500 uppercase mb-2">Pedidos por estado</p>
+          <ResponsiveContainer width="100%" height="88%">
+            <BarChart data={chartEstados}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="name" tick={{ fontSize: 10 }} /><YAxis allowDecimals={false} tick={{ fontSize: 10 }} /><Tooltip />
+              <Bar dataKey="value" name="Pedidos" radius={[6, 6, 0, 0]}>{chartEstados.map(c => <Cell key={c.name} fill={c.color} />)}</Bar>
+            </BarChart>
+          </ResponsiveContainer>
         </div>
-        <div className="overflow-x-auto -mx-6">
-          <table className="w-full text-left min-w-[800px]">
-            <thead className="bg-gray-50 text-xs font-bold text-gray-500 uppercase">
-              <tr>
-                <th className="px-6 py-4">Folio / Ticket</th>
-                <th className="px-6 py-4">Cliente</th>
-                <th className="px-6 py-4">Monto</th>
-                <th className="px-6 py-4">Estado</th>
-                <th className="px-6 py-4 text-right">Acciones</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {tickets.map((ticket) => (
-                <tr key={ticket.folio} className="hover:bg-blue-50/20 transition-colors group">
-                  <td className="px-6 py-4">
-                    <div className="font-black text-gray-900">{ticket.no_ticket}</div>
-                    <div className="font-mono text-[10px] text-gray-400">{ticket.folio.substring(0,8)}...</div>
-                  </td>
-                  <td className="px-6 py-4 text-gray-600 font-medium text-xs">
-                    {ticket.nombre_cliente.substring(0,30)}
-                  </td>
-                  <td className="px-6 py-4 text-gray-500 text-xs">${ticket.monto_de_compra}</td>
-                  <td className="px-6 py-4">
-                    <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase border ${getStatusColor(ticket.estado)}`}>
-                      {ticket.estado}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-right flex justify-end gap-2">
-                    <button 
-                      onClick={() => openPrintModal(ticket)}
-                      className="text-gray-600 hover:text-gray-900 p-2 rounded-lg hover:bg-gray-200 transition-all shadow-sm border border-gray-200"
-                      title="Imprimir Ticket"
-                    >
-                      <i className="fas fa-print"></i>
-                    </button>
-                    <button 
-                      onClick={() => setEditingTicket({ ...ticket })}
-                      className="text-blue-800 hover:text-blue-900 p-2 rounded-lg hover:bg-blue-100 transition-all shadow-sm border border-blue-100"
-                      title="Editar Pedido"
-                    >
-                      <i className="fas fa-edit"></i>
-                    </button>
-                    <button 
-                      onClick={() => deleteTicket(ticket.folio)}
-                      className="text-red-500 hover:text-red-700 p-2 rounded-lg hover:bg-red-50 transition-all shadow-sm border border-red-100"
-                      title="Eliminar Pedido"
-                    >
-                      <i className="fas fa-trash-alt"></i>
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* Stats Summary Section */}
-      <div className="bg-white p-6 rounded-2xl shadow-md border border-gray-100">
-        <h3 className="text-lg font-bold mb-4 flex items-center gap-2 text-gray-800">
-          <i className="fas fa-chart-pie text-red-600"></i>
-          Resumen Logístico
-        </h3>
-        <div className="h-[300px] w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData} layout="vertical" margin={{ left: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f1f5f9" />
-              <XAxis type="number" hide />
-              <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} width={100} />
-              <Tooltip 
-                cursor={{fill: 'transparent'}}
-                contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }} 
-              />
-              <Bar dataKey="value" radius={[0, 8, 8, 0]} barSize={40}>
-                {chartData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                ))}
-              </Bar>
+        <div className="bg-white p-4 rounded-2xl shadow h-64">
+          <p className="text-xs font-black text-gray-500 uppercase mb-2">Envío cobrado por día</p>
+          <ResponsiveContainer width="100%" height="88%">
+            <BarChart data={porDia}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="dia" tick={{ fontSize: 10 }} /><YAxis tick={{ fontSize: 10 }} /><Tooltip formatter={(v: number) => money(v)} />
+              <Bar dataKey="envio" name="Envío" fill="#1e40af" radius={[6, 6, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
       </div>
 
-      {/* Edit Modal */}
-      {editingTicket && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white w-full max-w-md rounded-3xl shadow-2xl overflow-hidden animate-slideUp">
-            <div className="bg-blue-800 text-white p-6 flex justify-between items-center">
-              <div>
-                <h4 className="text-xl font-black">Editar Pedido</h4>
-                <p className="text-blue-200 text-xs">Modificando: {editingTicket.no_ticket}</p>
-              </div>
-              <button onClick={() => setEditingTicket(null)} className="text-blue-300 hover:text-white transition-colors">
-                <i className="fas fa-times text-2xl"></i>
-              </button>
+      <div className="flex gap-2">
+        {(['pedidos', 'bitacora', 'tarifas'] as const).map(k => (
+          <button key={k} onClick={() => setTab(k)} className={`px-4 py-2 rounded-xl text-sm font-black capitalize ${tab === k ? 'bg-blue-800 text-white' : 'bg-white text-gray-500'}`}>
+            {k === 'bitacora' ? 'Bitácora' : k}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'pedidos' && (
+        <div className="bg-white rounded-2xl shadow overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 text-[10px] uppercase text-gray-500">
+              <tr><th className="p-3 text-left">Folio</th><th className="p-3 text-left">Cliente</th><th className="p-3 text-right">Km</th><th className="p-3 text-right">Envío</th><th className="p-3">Estado</th><th className="p-3"></th></tr>
+            </thead>
+            <tbody>
+              {inRange.map(p => (
+                <tr key={p.folio} className="border-t border-gray-100">
+                  <td className="p-3"><p className="font-black">{p.folio}</p><p className="text-[11px] text-gray-400">{fmtDate(p.fecha_creacion)}</p></td>
+                  <td className="p-3"><p className="font-bold">{p.nombre_cliente}</p><p className="text-[11px] text-gray-400">{p.comunidad || p.direccion}</p></td>
+                  <td className="p-3 text-right">{p.km}</td>
+                  <td className="p-3 text-right font-bold">{money(p.costo_de_envio)}{p.autorizo && <i className="fas fa-user-shield text-yellow-500 ml-1" title={`Autorizó ${p.autorizo}`}></i>}</td>
+                  <td className="p-3 text-center"><span className={`text-[11px] font-bold px-2 py-1 rounded-full border ${statusStyle(p.estado)}`}>{p.estado}</span></td>
+                  <td className="p-3 whitespace-nowrap text-right">
+                    <button onClick={() => setDetail(p)} className="p-2 text-blue-800" title="Ver"><i className="fas fa-eye"></i></button>
+                    <button onClick={() => setEditing({ ...p })} className="p-2 text-gray-500" title="Editar"><i className="fas fa-pen"></i></button>
+                    <button onClick={() => remove(p)} className="p-2 text-red-500" title="Eliminar"><i className="fas fa-trash"></i></button>
+                  </td>
+                </tr>
+              ))}
+              {!inRange.length && <tr><td colSpan={6} className="p-8 text-center text-gray-400">Sin pedidos en el rango.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {tab === 'bitacora' && (
+        <div className="bg-white rounded-2xl shadow divide-y">
+          {bitacora.map((b, i) => (
+            <div key={i} className="p-3 text-sm">
+              <p><span className="font-black">{b.accion}</span> · {b.folio} <span className="text-gray-400 text-xs">· {fmtDate(b.fecha)}{b.autorizo ? ` · ${b.autorizo}` : ''}</span></p>
+              <p className="text-gray-600 text-xs">{b.detalle}</p>
             </div>
-            
-            <form onSubmit={updateTicket} className="p-6 space-y-4">
-              
-              {/* Ticket No Input */}
-              <div>
-                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">No. Ticket</label>
-                <input 
-                  type="text" 
-                  value={editingTicket.no_ticket}
-                  onChange={e => setEditingTicket({ ...editingTicket, no_ticket: e.target.value })}
-                  className="w-full p-3 border-2 border-gray-100 rounded-xl focus:border-blue-800 outline-none transition-all font-bold bg-gray-50 text-gray-900"
-                />
-              </div>
+          ))}
+          {!bitacora.length && <p className="p-8 text-center text-gray-400">Sin movimientos.</p>}
+        </div>
+      )}
 
-              {/* Amount Input */}
-              <div>
-                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Monto de Compra</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-3 text-gray-400 font-bold">$</span>
-                  <input 
-                    type="number" 
-                    value={editingTicket.monto_de_compra}
-                    onChange={e => setEditingTicket({ ...editingTicket, monto_de_compra: parseFloat(e.target.value) || 0 })}
-                    className="w-full pl-8 p-3 border-2 border-gray-100 rounded-xl focus:border-blue-800 outline-none transition-all font-bold bg-gray-50 text-gray-900"
-                  />
+      {tab === 'tarifas' && (
+        <div className="bg-white rounded-2xl shadow p-5 space-y-2 text-sm">
+          <p className="text-xs text-gray-500 mb-2"><i className="fas fa-info-circle mr-1"></i>Para cambiar una tarifa edita la pestaña "Tarifas" de la hoja. Aplica en el siguiente cálculo.</p>
+          {[
+            ['Banderazo', money(config.tarifas.banderazo)], ['Por km', money(config.tarifas.precio_km)], ['Por minuto', money(config.tarifas.precio_min)],
+            ['Cobro mínimo', money(config.tarifas.minimo)], ['Urgente / mismo día', '+' + money(config.tarifas.urgente)], ['Zona difícil', '+' + money(config.tarifas.zona_dificil)],
+            ['Envío gratis', `compra ≥ ${money(config.tarifas.gratis_monto)} y ≤ ${config.tarifas.gratis_km} km`],
+            ['Descuento', `${config.tarifas.desc_pct}% en compra ≥ ${money(config.tarifas.desc_monto)}`],
+            ['Autorización', `rutas de más de ${config.tarifas.max_km} km`], ['Vehículos activos', String(config.vehiculos.length)]
+          ].map(([k, v]) => <div key={k} className="flex justify-between border-b border-gray-50 py-1"><span className="text-gray-500">{k}</span><span className="font-bold">{v}</span></div>)}
+        </div>
+      )}
+
+      {detail && (
+        <div className="fixed inset-0 z-[1000] flex items-start justify-center p-4 bg-black/50 overflow-y-auto" onClick={() => setDetail(null)}>
+          <div className="bg-white rounded-3xl p-5 max-w-md w-full space-y-4 my-8" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center"><h3 className="text-lg font-black">{detail.folio}</h3><button onClick={() => setDetail(null)} className="ml-auto text-gray-400"><i className="fas fa-times"></i></button></div>
+            <div className="text-sm space-y-1">
+              <p><b>Cobro:</b> calculado {money(detail.envio_calculado)} · cobrado {money(detail.costo_de_envio)}{detail.precio_tabla !== '' ? ` · tabla ${money(Number(detail.precio_tabla))}` : ''}</p>
+              {detail.autorizo && <p><b>Autorizó:</b> {detail.autorizo} — {detail.ajuste_motivo}</p>}
+              <p><b>Ruta:</b> {detail.km} km · {detail.minutos} min {detail.ruta_manual === 'SI' && '(capturada a mano)'}</p>
+              {detail.embarque && <p><b>Embarque:</b> {detail.embarque.unidad} {detail.embarque.placas} · {detail.embarque.chofer}</p>}
+            </div>
+            {(detail.evidencias || []).map((ev, i) => (
+              <div key={i} className="text-sm bg-gray-50 p-3 rounded-xl">
+                <p className="font-bold">{ev.resultado} · {fmtDate(ev.fecha)}</p>
+                {ev.motivo && <p className="text-gray-600">{ev.motivo}</p>}
+                {ev.recibio && <p className="text-gray-600">Recibió: {ev.recibio}</p>}
+                <div className="flex gap-3 mt-1 text-xs font-bold">
+                  {ev.foto_url && <a href={ev.foto_url} target="_blank" rel="noreferrer" className="text-blue-700"><i className="fas fa-image mr-1"></i>Foto</a>}
+                  {ev.lat && ev.lng && <a href={`https://www.google.com/maps?q=${ev.lat},${ev.lng}`} target="_blank" rel="noreferrer" className="text-red-600"><i className="fas fa-map-pin mr-1"></i>Ubicación</a>}
                 </div>
               </div>
-
-              {/* Status Select */}
-              <div>
-                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Estado del Pedido</label>
-                <div className="relative">
-                  <select 
-                    value={editingTicket.estado}
-                    onChange={e => setEditingTicket({ ...editingTicket, estado: e.target.value })}
-                    className="w-full p-3 border-2 border-gray-100 rounded-xl focus:border-blue-800 outline-none transition-all appearance-none bg-gray-50 font-medium text-gray-900"
-                  >
-                    <option value={TicketStatus.PENDING}>Pendiente</option>
-                    <option value={TicketStatus.IN_TRANSIT}>En Tránsito</option>
-                    <option value={TicketStatus.DELIVERED}>Entregado</option>
-                    <option value={TicketStatus.NOT_FOUND}>No Encontrado</option>
-                  </select>
-                  <i className="fas fa-chevron-down absolute right-4 top-4 text-gray-400 pointer-events-none"></i>
-                </div>
-              </div>
-
-              <div className="pt-4 flex gap-3">
-                <button 
-                  type="button"
-                  onClick={() => setEditingTicket(null)}
-                  className="flex-1 py-3 px-4 bg-gray-100 text-gray-600 font-bold rounded-xl hover:bg-gray-200 transition-all"
-                >
-                  Cancelar
-                </button>
-                <button 
-                  type="submit"
-                  className="flex-1 py-3 px-4 bg-blue-800 text-white font-bold rounded-xl hover:bg-blue-900 shadow-lg shadow-blue-200 transition-all"
-                >
-                  Guardar Cambios
-                </button>
-              </div>
-            </form>
+            ))}
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={() => printNode('admin-ticket')} className="bg-gray-800 text-white font-bold py-3 rounded-xl"><i className="fas fa-print mr-2"></i>Imprimir</button>
+              <button onClick={() => downloadPdf('admin-ticket', `Embarque_${detail.folio}.pdf`)} className="bg-red-600 text-white font-bold py-3 rounded-xl"><i className="fas fa-file-pdf mr-2"></i>PDF</button>
+            </div>
+            <div className="flex justify-center bg-gray-100 p-3 rounded-xl overflow-x-auto"><Ticket id="admin-ticket" order={detail} /></div>
           </div>
         </div>
       )}
 
-      {/* Print Preview Modal */}
-      {printOrder && (
-        <div className="fixed inset-0 bg-black/80 z-[60] flex items-center justify-center p-4 backdrop-blur-sm animate-fadeIn">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden flex flex-col max-h-[90vh]">
-                <div className="bg-gray-100 p-4 border-b flex justify-between items-center shrink-0">
-                    <h3 className="font-bold text-gray-700 flex items-center gap-2">
-                      <i className="fas fa-print"></i> Vista Previa Ticket
-                    </h3>
-                    <button onClick={() => setPrintOrder(null)} className="text-gray-400 hover:text-red-500 transition-colors">
-                      <i className="fas fa-times text-xl"></i>
-                    </button>
-                </div>
-                
-                <div className="p-4 bg-gray-50 flex justify-center overflow-auto grow">
-                   {/* Ticket Render Container - Matching ShipmentView exactly */}
-                   <div id="admin-ticket-content" className="w-[80mm] bg-white shadow-lg p-2 text-black font-sans text-xs origin-top transform scale-100">
-                      {/* Header con Logo CSS */}
-                      <div className="flex flex-col items-center justify-center mb-2 border-b-2 border-black pb-2">
-                        <div className="transform scale-90 origin-center mb-1">
-                            <div className="relative flex flex-col items-center justify-center">
-                              <div className="bg-black text-white font-black italic text-lg px-3 py-0.5 rounded-md shadow-sm transform -rotate-2 z-10 border border-white">
-                                Ferre
-                              </div>
-                              <div className="bg-black text-white font-black italic text-sm px-4 py-0.5 rounded shadow-sm transform rotate-0 -mt-1 ml-4 border border-white z-0">
-                                Don Nico
-                              </div>
-                            </div>
-                        </div>
-                        <p className="text-[9px] font-bold text-center leading-none mt-1">Jilotepec de Molina Enríquez</p>
-                        <p className="mt-1 font-black text-[10px] border border-black inline-block px-2 py-0.5 uppercase">Reimpresión Embarque</p>
-                      </div>
-
-                      {/* Datos Generales */}
-                      <div className="mb-2 space-y-0.5 text-[9px] leading-tight font-bold">
-                        <div className="flex justify-between">
-                          <span>FECHA:</span>
-                          <span>{new Date().toLocaleDateString()} {new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span>FOLIO:</span>
-                          <span className="font-black">{printOrder.folio.slice(0,8)}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span>TICKET:</span>
-                          <span className="font-black text-[11px]">{printOrder.no_ticket}</span>
-                        </div>
-                      </div>
-
-                      {/* Datos Vehículo */}
-                      <div className="border-t border-dotted border-black py-1 mb-2 space-y-0.5 text-[9px] uppercase leading-tight">
-                        <div className="flex justify-between">
-                          <span className="font-bold">UNIDAD:</span>
-                          <span className="text-right max-w-[50mm] break-words">{printShipmentData?.unidad || "N/A"}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="font-bold">PLACAS:</span>
-                          <span className="text-right">{printShipmentData?.placas || "N/A"}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span className="font-bold">CHOFER:</span>
-                          <span className="text-right max-w-[50mm] break-words">{printShipmentData?.chofer || "N/A"}</span>
-                        </div>
-                      </div>
-
-                      {/* Datos de Entrega */}
-                      <div className="border-t border-b border-black py-2 mb-2">
-                        <p className="font-black mb-1 text-[9px] uppercase bg-black text-white inline-block px-1">DATOS DE ENTREGA:</p>
-                        <p className="uppercase text-[10px] leading-none font-black mb-1">{printOrder.nombre_cliente}</p>
-                        {printOrder.direccion && <p className="uppercase text-[9px] leading-tight mb-1">{printOrder.direccion}</p>}
-                        <p className="mt-1 text-[10px] font-bold"><i className="fas fa-phone mr-1"></i> {printOrder.telefono}</p>
-                      </div>
-
-                      {/* Totales */}
-                      <div className="space-y-0.5 text-right mb-4 text-[9px] font-bold">
-                          <div className="flex justify-between">
-                          <span>UNIDADES:</span>
-                          <span>{printOrder.unidades} pzs</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span>SUBTOTAL:</span>
-                          <span>${printOrder.monto_de_compra.toFixed(2)}</span>
-                        </div>
-                        <div className="flex justify-between">
-                          <span>ENVIO:</span>
-                          <span>${printOrder.costo_de_envio.toFixed(2)}</span>
-                        </div>
-                        <div className="flex justify-between text-[11px] font-black border-t-2 border-black pt-1 mt-1">
-                          <span>TOTAL A COBRAR:</span>
-                          <span>${(printOrder.monto_de_compra + printOrder.costo_de_envio).toFixed(2)}</span>
-                        </div>
-                      </div>
-
-                      {/* Firmas */}
-                      <div className="mt-6 text-center">
-                        <div className="mb-6">
-                           <div className="h-8 mb-1 border-b border-black w-3/4 mx-auto"></div>
-                           <p className="text-[8px] font-bold uppercase">Firma de Recibido / Sello</p>
-                        </div>
-                        <div className="mb-4">
-                           <div className="h-8 mb-1 border-b border-black w-3/4 mx-auto"></div>
-                           <p className="text-[8px] font-bold uppercase">Validación Seguridad Física</p>
-                        </div>
-                      </div>
-
-                      <div className="text-center text-[8px] mt-2 border-t border-black pt-1">
-                        <p className="font-bold">*** FERRE DON NICO ***</p>
-                      </div>
-                   </div>
-                </div>
-
-                <div className="p-4 bg-white border-t grid grid-cols-2 gap-3 shrink-0">
-                    <button onClick={handleWebPrint} className="bg-blue-800 text-white font-bold py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-blue-900 transition-colors shadow-lg">
-                        <i className="fas fa-print"></i> Imprimir
-                    </button>
-                    <button onClick={handleDownloadPDF} className="border-2 border-red-500 text-red-500 font-bold py-3 rounded-xl flex items-center justify-center gap-2 hover:bg-red-50 transition-colors">
-                        <i className="fas fa-file-pdf"></i> PDF
-                    </button>
-                </div>
+      {editing && (
+        <div className="fixed inset-0 z-[1000] flex items-center justify-center p-4 bg-black/50">
+          <form onSubmit={saveEdit} className="bg-white rounded-3xl p-6 max-w-md w-full space-y-3">
+            <h3 className="text-lg font-black">Editar {editing.folio}</h3>
+            {([['no_ticket', 'Ticket', 'text'], ['telefono', 'Teléfono', 'text'], ['direccion', 'Dirección', 'text'], ['monto_de_compra', 'Monto compra', 'number'], ['costo_de_envio', 'Envío cobrado', 'number']] as const).map(([k, l, type]) => (
+              <div key={k}><label className="block text-xs font-bold text-gray-500 uppercase">{l}</label>
+                <input type={type} value={String((editing as any)[k] ?? '')} onChange={e => setEditing({ ...editing, [k]: type === 'number' ? parseFloat(e.target.value) || 0 : e.target.value } as Pedido)} className="w-full p-3 border-2 border-gray-100 rounded-xl" />
+              </div>
+            ))}
+            <div><label className="block text-xs font-bold text-gray-500 uppercase">Estado</label>
+              <select value={editing.estado} onChange={e => setEditing({ ...editing, estado: e.target.value })} className="w-full p-3 border-2 border-gray-100 rounded-xl">
+                {Object.values(Estado).map(s => <option key={s}>{s}</option>)}
+              </select>
             </div>
+            <p className="text-[11px] text-gray-400">Cada cambio queda en la bitácora con tu nombre.</p>
+            <div className="flex gap-2"><button type="button" onClick={() => setEditing(null)} className="flex-1 border py-3 rounded-xl font-bold">Cancelar</button><button className="flex-1 bg-blue-800 text-white py-3 rounded-xl font-black">Guardar</button></div>
+          </form>
         </div>
       )}
     </div>

@@ -1,326 +1,176 @@
-import React, { useState, useEffect } from 'react';
-import { sheetDb } from '../services/sheetDbService';
-import { TicketStatus, Pedido } from '../types';
+import React, { useEffect, useState } from 'react';
+import { api } from '../services/api';
+import { compressPhoto, getPosition, money } from '../services/utils';
+import { Config, Estado, Pedido } from '../types';
+import AuthModal from './AuthModal';
 
-const DeliveryView: React.FC = () => {
+type Mode = 'idle' | 'ok' | 'fail';
+
+/** Confirmación de entrega con foto obligatoria, hora y ubicación; reintento o cancelación. */
+const DeliveryView: React.FC<{ config: Config }> = ({ config }) => {
+  const [transit, setTransit] = useState<Pedido[]>([]);
+  const [notFound, setNotFound] = useState<Pedido[]>([]);
+  const [loading, setLoading] = useState(false);
   const [folio, setFolio] = useState('');
-  const [showFailureForm, setShowFailureForm] = useState(false);
-  const [observation, setObservation] = useState('');
-  const [hasPhoto, setHasPhoto] = useState(false);
-  const [photoBase64, setPhotoBase64] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  
-  // New state for dropdown
-  const [inTransitOrders, setInTransitOrders] = useState<Pedido[]>([]);
-  const [loadingList, setLoadingList] = useState(false);
+  const [mode, setMode] = useState<Mode>('idle');
+  const [photo, setPhoto] = useState('');
+  const [recibio, setRecibio] = useState('');
+  const [motivo, setMotivo] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [cancelFolio, setCancelFolio] = useState('');
 
-  // Fetch orders on mount
-  useEffect(() => {
-    fetchInTransitOrders();
-  }, []);
-
-  const fetchInTransitOrders = async () => {
-    setLoadingList(true);
+  const load = async () => {
+    setLoading(true);
     try {
-      const data = await sheetDb.get('pedido', { estado: TicketStatus.IN_TRANSIT });
-      if (data && Array.isArray(data)) {
-        const parsedData = data.map((item: any) => {
-          const normalizedItem: any = {};
-          for (const key in item) {
-            normalizedItem[key.trim().toLowerCase()] = item[key];
-          }
-          return {
-            ...normalizedItem,
-            monto_de_compra: parseFloat(normalizedItem.monto_de_compra) || 0,
-            unidades: parseInt(normalizedItem.unidades) || 0,
-            costo_de_envio: parseFloat(normalizedItem.costo_de_envio) || 0
-          };
-        });
-        setInTransitOrders(parsedData);
-      }
-    } catch (error) {
-      console.error("Error fetching in-transit orders:", error);
+      const all = await api.orders();
+      setTransit(all.filter(o => o.estado === Estado.TRANSITO));
+      setNotFound(all.filter(o => o.estado === Estado.NO_ENCONTRADO));
+    } catch (e: any) {
+      alert(e.message);
     } finally {
-      setLoadingList(false);
+      setLoading(false);
     }
   };
+  useEffect(() => { load(); }, []);
 
-  const resetForm = () => {
-    setFolio('');
-    setShowFailureForm(false);
-    setObservation('');
-    setHasPhoto(false);
-    setPhotoBase64('');
-    // Refresh list to remove the processed order
-    fetchInTransitOrders();
+  const order = transit.find(o => o.folio === folio);
+  const reset = () => { setFolio(''); setMode('idle'); setPhoto(''); setRecibio(''); setMotivo(''); load(); };
+
+  const onPhoto = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    try { setPhoto(await compressPhoto(f)); } catch (err: any) { alert(err.message); }
   };
 
-  const handleDelivered = async () => {
-    if (!folio.trim()) {
-      alert("Por favor seleccione un pedido.");
-      return;
-    }
-
-    setIsSubmitting(true);
-    
+  const send = async () => {
+    if (!order) return;
+    if (!photo) return alert('La foto es obligatoria.');
+    if (mode === 'fail' && !motivo.trim()) return alert('Escribe el motivo.');
+    setBusy(true);
     try {
-      const selectedFolio = folio.trim();
-      if (selectedFolio.startsWith('NO_FOLIO_')) {
-        alert("Este pedido no tiene un folio asignado en la base de datos y no puede ser procesado.");
-        return;
+      const pos = await getPosition();
+      if (mode === 'ok') {
+        await api.deliver({ folio: order.folio, foto: photo, recibio, lat: pos?.lat, lng: pos?.lng });
+        alert(`✅ ${order.folio} marcado como ENTREGADO.`);
+      } else {
+        await api.fail({ folio: order.folio, foto: photo, motivo, lat: pos?.lat, lng: pos?.lng });
+        alert(`⚠️ ${order.folio} reportado como NO ENCONTRADO.`);
       }
-
-      await sheetDb.update('pedido', 'folio', selectedFolio, { estado: TicketStatus.DELIVERED });
-
-      alert(`✅ Pedido marcado como ENTREGADO exitosamente.`);
-      resetForm();
-    } catch (error: any) {
-      console.error('Error updating delivery:', error);
-      alert('Error al actualizar: ' + error.message);
+      reset();
+    } catch (err: any) {
+      alert('Error: ' + err.message);
     } finally {
-      setIsSubmitting(false);
+      setBusy(false);
     }
   };
 
-  const handleNotDeliveredInit = () => {
-    if (!folio.trim()) {
-      alert("Por favor seleccione un pedido.");
-      return;
-    }
-    setShowFailureForm(true);
+  const reschedule = async (f: string) => {
+    try { await api.reschedule(f); load(); } catch (e: any) { alert(e.message); }
   };
-
-  const handleSubmitFailure = async () => {
-    if (!observation.trim()) {
-      alert("Por favor ingrese una observación.");
-      return;
-    }
-    if (!hasPhoto || !photoBase64) {
-      alert("Es necesario adjuntar evidencia fotográfica.");
-      return;
-    }
-
-    setIsSubmitting(true);
-
-    try {
-      const selectedFolio = folio.trim();
-      if (selectedFolio.startsWith('NO_FOLIO_')) {
-        alert("Este pedido no tiene un folio asignado en la base de datos y no puede ser procesado.");
-        return;
-      }
-
-      // 1. Update Pedido Status
-      await sheetDb.update('pedido', 'folio', selectedFolio, { estado: TicketStatus.NOT_FOUND });
-
-      // 2. Insert Evidence
-      await sheetDb.insert('evidencias_entrega', {
-         folio: selectedFolio, 
-         evidencia_fotografica: photoBase64
-      });
-
-      alert(`⚠️ Incidencia reportada.\nEstado: NO ENTREGADO / NO ENCONTRADO`);
-      resetForm();
-
-    } catch (error: any) {
-      console.error('Error reporting failure:', error);
-      alert('Error al reportar incidencia: ' + error.message);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      const file = e.target.files[0];
-      setHasPhoto(true);
-      
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        if (typeof reader.result === 'string') {
-          // Comprimir la imagen para no exceder el límite de 50,000 caracteres de Google Sheets
-          const img = new Image();
-          img.onload = () => {
-            const canvas = document.createElement('canvas');
-            const MAX_WIDTH = 400; // Resolución baja para evidencia
-            const MAX_HEIGHT = 400;
-            let width = img.width;
-            let height = img.height;
-
-            if (width > height) {
-              if (width > MAX_WIDTH) {
-                height *= MAX_WIDTH / width;
-                width = MAX_WIDTH;
-              }
-            } else {
-              if (height > MAX_HEIGHT) {
-                width *= MAX_HEIGHT / height;
-                height = MAX_HEIGHT;
-              }
-            }
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-              ctx.drawImage(img, 0, 0, width, height);
-              // Comprimir a JPEG con calidad 0.4
-              const compressedBase64 = canvas.toDataURL('image/jpeg', 0.4);
-              setPhotoBase64(compressedBase64);
-            } else {
-              setPhotoBase64(reader.result as string);
-            }
-          };
-          img.src = reader.result;
-        }
-      };
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const selectedOrderInfo = inTransitOrders.find(o => o.folio && String(o.folio).trim() === folio.trim());
 
   return (
-    <div className="animate-fadeIn">
-      <div className="bg-white p-6 rounded-2xl shadow-xl border-t-4 border-red-600 max-w-lg mx-auto">
-        {/* Header */}
-        <div className="flex items-center gap-4 mb-8 border-b border-gray-100 pb-6">
-          <div className="p-4 bg-red-100 text-red-600 rounded-2xl">
-            <i className="fas fa-box-open text-3xl"></i>
-          </div>
+    <div className="animate-fadeIn space-y-5 max-w-lg mx-auto">
+      <div className="bg-white p-5 rounded-2xl shadow-xl border-t-4 border-red-600 space-y-4">
+        <header className="flex items-center gap-3 border-b border-gray-100 pb-4">
+          <div className="p-3 bg-red-100 text-red-600 rounded-xl"><i className="fas fa-box-open text-2xl"></i></div>
           <div>
-            <h2 className="text-2xl font-black text-gray-800">Confirmar Entrega</h2>
-            <p className="text-sm text-gray-500">Pedidos En Tránsito</p>
+            <h2 className="text-2xl font-black text-gray-800">Confirmar entrega</h2>
+            <p className="text-sm text-gray-500">Pedidos en tránsito ({transit.length})</p>
           </div>
-        </div>
+          <button onClick={load} className="ml-auto text-gray-400 hover:text-red-600" title="Actualizar"><i className={`fas fa-sync ${loading ? 'fa-spin' : ''}`}></i></button>
+        </header>
 
-        {/* Folio Selection Section */}
-        <div className="mb-6">
-          <label className="block text-xs font-black text-gray-400 mb-2 uppercase tracking-widest pl-1">
-            Seleccionar Pedido {loadingList && <i className="fas fa-spinner fa-spin ml-2"></i>}
-          </label>
-          <div className="relative">
-            <i className="fas fa-truck-loading absolute left-5 top-1/2 transform -translate-y-1/2 text-gray-400 text-xl"></i>
-            <select
-              value={folio}
-              onChange={(e) => setFolio(e.target.value)}
-              disabled={showFailureForm || isSubmitting}
-              className="w-full pl-14 pr-4 py-5 text-sm font-bold border-2 border-gray-100 rounded-2xl focus:border-red-600 focus:ring-0 outline-none transition-all bg-gray-50 text-gray-900 appearance-none truncate"
-            >
-              <option value="">-- Seleccionar de la lista --</option>
-              {inTransitOrders.map((order, index) => (
-                <option key={order.folio || `order-${index}`} value={order.folio || `NO_FOLIO_${index}`}>
-                  {order.folio ? '' : '[SIN FOLIO] '}{order.no_ticket} - {order.nombre_cliente}
-                </option>
-              ))}
-            </select>
-            <div className="absolute right-5 top-1/2 transform -translate-y-1/2 pointer-events-none">
-              <i className="fas fa-chevron-down text-gray-400"></i>
+        <select value={folio} onChange={e => { setFolio(e.target.value); setMode('idle'); setPhoto(''); }} disabled={busy}
+          className="w-full p-4 text-sm font-bold border-2 border-gray-100 rounded-2xl bg-gray-50">
+          <option value="">— Seleccionar pedido —</option>
+          {transit.map(o => <option key={o.folio} value={o.folio}>{o.folio} · {o.no_ticket} · {o.nombre_cliente}</option>)}
+        </select>
+
+        {order && (
+          <div className="p-4 bg-gray-50 rounded-xl border border-gray-100 text-sm space-y-2">
+            <p className="font-medium text-gray-800">{order.direccion}{order.comunidad ? ` — ${order.comunidad}` : ''}</p>
+            <div className="flex flex-wrap gap-2 text-xs font-bold">
+              <a href={`tel:${order.telefono}`} className="bg-blue-100 text-blue-700 px-2 py-1 rounded"><i className="fas fa-phone mr-1"></i>{order.telefono}</a>
+              <span className="bg-gray-200 px-2 py-1 rounded">{order.unidades} pzs</span>
+              <span className="bg-green-100 text-green-800 px-2 py-1 rounded">Cobrar {money(order.monto_de_compra + order.costo_de_envio)}</span>
+              {order.lat && order.lng && (
+                <a href={`https://www.google.com/maps/dir/?api=1&destination=${order.lat},${order.lng}`} target="_blank" rel="noreferrer" className="bg-red-100 text-red-700 px-2 py-1 rounded"><i className="fas fa-location-arrow mr-1"></i>Ruta</a>
+              )}
             </div>
           </div>
-          
-          {/* Display Details if selected */}
-          {selectedOrderInfo && (
-            <div className="mt-4 p-4 bg-gray-50 rounded-xl border border-gray-100 animate-fadeIn">
-              <p className="text-xs text-gray-500 font-bold uppercase mb-1">Dirección de Entrega:</p>
-              <p className="text-sm font-medium text-gray-800">
-                {selectedOrderInfo.direccion || 'Dirección no especificada'}
-              </p>
-              <div className="flex gap-4 mt-3">
-                 <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded font-bold">
-                   <i className="fas fa-phone mr-1"></i> {selectedOrderInfo.telefono}
-                 </span>
-                 <span className="text-xs bg-gray-200 text-gray-700 px-2 py-1 rounded font-bold">
-                   <i className="fas fa-box mr-1"></i> {selectedOrderInfo.unidades} pzs
-                 </span>
-              </div>
-            </div>
-          )}
-        </div>
+        )}
 
-        {/* Action Buttons */}
-        {!showFailureForm ? (
-          <div className="grid grid-cols-1 gap-4 animate-fadeIn">
-            <button 
-              onClick={handleDelivered}
-              disabled={isSubmitting || !folio}
-              className="group relative overflow-hidden w-full bg-green-500 hover:bg-green-600 text-white p-6 rounded-2xl transition-all shadow-lg shadow-green-200 active:scale-[0.98] disabled:opacity-50 disabled:active:scale-100 disabled:cursor-not-allowed border-b-4 border-green-700"
-            >
-              <div className="relative z-10 flex items-center justify-between">
-                <span className="text-xl font-black tracking-tight">ENTREGADO</span>
-                <i className="fas fa-check-circle text-3xl group-hover:scale-110 transition-transform"></i>
-              </div>
-              <div className="absolute inset-0 bg-green-600 transform scale-x-0 group-hover:scale-x-100 transition-transform origin-left duration-300"></div>
+        {order && mode === 'idle' && (
+          <div className="grid grid-cols-1 gap-3">
+            <button onClick={() => setMode('ok')} className="w-full bg-green-500 hover:bg-green-600 text-white p-5 rounded-2xl border-b-4 border-green-700 flex items-center justify-between">
+              <span className="text-xl font-black">ENTREGADO</span><i className="fas fa-check-circle text-3xl"></i>
             </button>
-
-            <button 
-              onClick={handleNotDeliveredInit}
-              disabled={isSubmitting || !folio}
-              className="group w-full bg-red-50 hover:bg-red-100 text-red-600 border-2 border-red-100 p-6 rounded-2xl transition-all active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <div className="flex items-center justify-between">
-                <span className="text-lg font-bold">NO ENTREGADO</span>
-                <i className="fas fa-times-circle text-2xl"></i>
-              </div>
+            <button onClick={() => setMode('fail')} className="w-full bg-red-50 hover:bg-red-100 text-red-600 border-2 border-red-100 p-5 rounded-2xl flex items-center justify-between">
+              <span className="text-lg font-bold">NO ENTREGADO</span><i className="fas fa-times-circle text-2xl"></i>
             </button>
           </div>
-        ) : (
-          /* Failure Form */
-          <div className="space-y-5 animate-slideUp bg-red-50 p-6 rounded-3xl border border-red-100">
-            <div className="flex items-center gap-2 text-red-700 mb-2">
-              <i className="fas fa-exclamation-triangle"></i>
-              <h3 className="font-bold">Reporte de Incidencia</h3>
-            </div>
+        )}
 
-            {/* Photo Evidence */}
-            <div className="relative group">
-              <input 
-                type="file" 
-                accept="image/*" 
-                capture="environment" 
-                onChange={handlePhotoChange}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-              />
-              <div className={`w-full py-8 flex flex-col items-center justify-center border-2 border-dashed rounded-2xl transition-all ${hasPhoto ? 'border-green-500 bg-green-50' : 'border-red-200 bg-white group-hover:bg-red-50'}`}>
-                <div className={`p-3 rounded-full mb-3 ${hasPhoto ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-400'}`}>
-                  <i className={`fas ${hasPhoto ? 'fa-check text-xl' : 'fa-camera text-xl'}`}></i>
+        {order && mode !== 'idle' && (
+          <div className={`space-y-4 p-4 rounded-2xl border animate-slideUp ${mode === 'ok' ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100'}`}>
+            <h3 className={`font-black ${mode === 'ok' ? 'text-green-700' : 'text-red-700'}`}>
+              {mode === 'ok' ? 'Evidencia de entrega' : 'Reporte de no entrega'}
+            </h3>
+            <label className="relative block cursor-pointer">
+              <input type="file" accept="image/*" capture="environment" onChange={onPhoto} className="hidden" />
+              {photo ? (
+                <img src={photo} alt="Evidencia" className="w-full max-h-64 object-cover rounded-xl border-2 border-green-400" />
+              ) : (
+                <div className="w-full py-8 flex flex-col items-center border-2 border-dashed rounded-2xl bg-white border-gray-300">
+                  <i className="fas fa-camera text-2xl text-gray-400 mb-2"></i>
+                  <span className="text-sm font-bold text-gray-500">{mode === 'ok' ? 'Foto de la mercancía entregada' : 'Foto del domicilio'}</span>
                 </div>
-                <span className={`text-sm font-bold ${hasPhoto ? 'text-green-700' : 'text-gray-500'}`}>
-                  {hasPhoto ? 'Evidencia Adjuntada' : 'Tomar Foto de Domicilio'}
-                </span>
-              </div>
-            </div>
-
-            {/* Observation Text */}
-            <div>
-              <label className="block text-xs font-bold text-red-700 mb-2 uppercase">Motivo de no entrega</label>
-              <textarea 
-                value={observation}
-                onChange={(e) => setObservation(e.target.value)}
-                placeholder="Describa la razón (ej. Domicilio incorrecto, Cliente ausente)..."
-                className="w-full p-4 border border-red-200 rounded-xl h-32 focus:ring-2 focus:ring-red-500 outline-none resize-none bg-white text-sm text-gray-900"
-              />
-            </div>
-
-            {/* Form Actions */}
-            <div className="flex gap-3 pt-2">
-              <button 
-                onClick={() => setShowFailureForm(false)}
-                disabled={isSubmitting}
-                className="flex-1 bg-white text-gray-600 font-bold py-4 rounded-xl border border-gray-200 hover:bg-gray-50 transition-all text-sm"
-              >
-                Cancelar
-              </button>
-              <button 
-                onClick={handleSubmitFailure}
-                disabled={isSubmitting}
-                className="flex-1 bg-red-600 text-white font-bold py-4 rounded-xl hover:bg-red-700 shadow-lg shadow-red-200 transition-all text-sm flex items-center justify-center gap-2"
-              >
-                {isSubmitting ? <i className="fas fa-circle-notch fa-spin"></i> : <i className="fas fa-paper-plane"></i>}
-                Enviar Reporte
+              )}
+            </label>
+            {mode === 'ok' ? (
+              <input value={recibio} onChange={e => setRecibio(e.target.value)} placeholder="¿Quién recibió? (opcional)" className="w-full p-3 border border-green-200 rounded-xl bg-white text-sm" />
+            ) : (
+              <textarea value={motivo} onChange={e => setMotivo(e.target.value)} rows={3} placeholder="Motivo (ej. domicilio incorrecto, cliente ausente)"
+                className="w-full p-3 border border-red-200 rounded-xl bg-white text-sm resize-none" />
+            )}
+            <p className="text-[11px] text-gray-500"><i className="fas fa-location-dot mr-1"></i>Se guardan la hora y la ubicación del teléfono.</p>
+            <div className="flex gap-2">
+              <button onClick={() => { setMode('idle'); setPhoto(''); }} disabled={busy} className="flex-1 bg-white border border-gray-200 font-bold py-3 rounded-xl text-gray-600">Regresar</button>
+              <button onClick={send} disabled={busy} className={`flex-1 text-white font-black py-3 rounded-xl flex items-center justify-center gap-2 ${mode === 'ok' ? 'bg-green-600' : 'bg-red-600'}`}>
+                {busy ? <i className="fas fa-circle-notch fa-spin"></i> : <i className="fas fa-paper-plane"></i>} Enviar
               </button>
             </div>
           </div>
         )}
       </div>
+
+      {notFound.length > 0 && (
+        <div className="bg-white p-5 rounded-2xl shadow-xl border-t-4 border-yellow-500 space-y-3">
+          <h3 className="font-black text-gray-800"><i className="fas fa-redo text-yellow-500 mr-2"></i>No encontrados ({notFound.length})</h3>
+          {notFound.map(o => (
+            <div key={o.folio} className="flex items-center gap-2 bg-gray-50 p-3 rounded-xl text-sm">
+              <div className="flex-1 min-w-0">
+                <p className="font-bold truncate">{o.folio} · {o.nombre_cliente}</p>
+                <p className="text-xs text-gray-500">Intentos: {o.intentos + 1}</p>
+              </div>
+              <button onClick={() => reschedule(o.folio)} className="px-3 py-2 rounded-lg bg-blue-800 text-white text-xs font-bold">Reprogramar</button>
+              <button onClick={() => setCancelFolio(o.folio)} className="px-3 py-2 rounded-lg bg-red-100 text-red-700 text-xs font-bold">Cancelar</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {cancelFolio && (
+        <AuthModal
+          title={`Cancelar ${cancelFolio}`}
+          subtitle="El pedido quedará como Cancelado"
+          autorizadores={config.autorizadores}
+          askReason
+          reasonLabel="Motivo de cancelación"
+          onConfirm={async (auth, reason) => { await api.cancel(cancelFolio, reason, auth); setCancelFolio(''); load(); }}
+          onClose={() => setCancelFolio('')}
+        />
+      )}
     </div>
   );
 };
